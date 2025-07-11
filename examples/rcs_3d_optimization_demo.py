@@ -110,17 +110,24 @@ def main():
     )
     
     # Run optimization
-    print("\n   Running gradient-based optimization (Adam)...")
+    # print("\n   Running gradient-based optimization (Adam)...")
     print("   This may take several minutes with GPU acceleration...")
     
     start_time = time.time()
     
-    optimized_sphere = optimizer.gradient_descent_3d(
+    # optimized_sphere = optimizer.gradient_descent_3d(
+    #     sphere_geometry,
+    #     n_iterations=100,
+    #     learning_rate=0.05,
+    #     target_angles=target_angles,
+    #     method='adam'
+    # )
+
+    optimized_sphere = optimizer.differential_evolution_3d(
         sphere_geometry,
-        n_iterations=100,
-        learning_rate=0.05,
-        target_angles=target_angles,
-        method='adam'
+        n_generations=100,
+        population_size=100,
+        target_angles=target_angles
     )
     
     elapsed_time = time.time() - start_time

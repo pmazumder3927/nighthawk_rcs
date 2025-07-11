@@ -142,9 +142,10 @@ class TopologyOptimizer3D:
         # Setup control points if not provided
         if self.control_points is None:
             # Use subset of vertices as control points
-            n_control = min(100, len(geometry.mesh.vertices) // 10)
-            indices = np.random.choice(len(geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            n_vertices = len(geometry.mesh.vertices)
+            n_control = min(100, max(4, n_vertices // 10))
+            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = geometry.mesh.vertices[indices]
             
         n_params = self.control_points.shape[0] * 3
@@ -368,9 +369,10 @@ class TopologyOptimizer3D:
         
         # Setup control points
         if self.control_points is None:
-            n_control = min(50, len(initial_geometry.mesh.vertices) // 20)
-            indices = np.random.choice(len(initial_geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            n_vertices = len(initial_geometry.mesh.vertices)
+            n_control = min(50, max(4, n_vertices // 20))
+            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
         n_params = self.control_points.shape[0] * 3
@@ -403,8 +405,7 @@ class TopologyOptimizer3D:
             bounds,
             maxiter=n_generations,
             popsize=population_size,
-            disp=True,
-            workers=-1  # Use all CPU cores
+            disp=True
         )
         
         # Apply final solution
@@ -437,9 +438,10 @@ class TopologyOptimizer3D:
         
         # Setup control points
         if self.control_points is None:
-            n_control = min(75, len(initial_geometry.mesh.vertices) // 15)
-            indices = np.random.choice(len(initial_geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            n_vertices = len(initial_geometry.mesh.vertices)
+            n_control = min(75, max(4, n_vertices // 15))
+            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
         n_params = self.control_points.shape[0] * 3
