@@ -4,36 +4,14 @@ Quick test script to verify the RCS optimization package is working correctly.
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 print("Testing RCS Optimization Package Installation...")
 print("=" * 50)
 
-# Test 2D modules
-print("\n1. Testing 2D modules...")
-try:
-    from src.geometry import create_f117_inspired_2d_profile
-    from src.rcs_calc import RCSCalculator
-    from src.optimization import TopologyOptimizer
-    from src.visualization import RCSVisualizer
-    
-    print("✓ All 2D imports successful")
-    
-    # Test basic 2D functionality
-    geom = create_f117_inspired_2d_profile()
-    print(f"✓ Created 2D F-117 geometry with {geom.n_vertices} vertices")
-    
-    rcs_calc = RCSCalculator(frequency=10e9)
-    angles, rcs_db = rcs_calc.calculate_2d_rcs_pattern(geom, n_angles=36)
-    print(f"✓ Calculated 2D RCS pattern: mean = {rcs_db.mean():.1f} dBsm")
-    
-except ImportError as e:
-    print(f"❌ 2D module import error: {e}")
-except Exception as e:
-    print(f"❌ 2D test error: {e}")
-
-# Test 3D modules
-print("\n2. Testing 3D modules...")
+# Test 3D modules (this project focuses on 3D RCS optimization)
+print("\n1. Testing 3D modules...")
 try:
     from src.geometry_3d import create_f117_inspired_3d, create_simple_shape_3d
     from src.rcs_calc_3d import RCS3DCalculator
@@ -66,7 +44,7 @@ except Exception as e:
     print(f"❌ 3D test error: {e}")
 
 # Test visualization modules
-print("\n3. Testing visualization capabilities...")
+print("\n2. Testing visualization capabilities...")
 try:
     import matplotlib
     print("✓ Matplotlib available")
@@ -90,7 +68,7 @@ except ImportError as e:
     print(f"❌ Visualization import error: {e}")
 
 # Test optimization libraries
-print("\n4. Testing optimization libraries...")
+print("\n3. Testing optimization libraries...")
 try:
     import scipy.optimize
     print("✓ SciPy optimization available")
@@ -111,13 +89,8 @@ print("=" * 50)
 
 print("\n✅ Core functionality is ready!")
 print("\nTo run demos:")
-print("  - 2D demo: python examples/rcs_optimization_demo.py")
 print("  - 3D demo: python examples/rcs_3d_optimization_demo.py")
+print("  - Interactive notebook: jupyter notebook examples/jax_demo.ipynb")
+print("  - Exploration notebook: jupyter notebook examples/interactive_rcs_exploration.ipynb")
 print("\nNote: 3D optimization with GPU can take significant time.")
-print("Adjust iterations in the demo script for faster testing.")
-
-# Import numpy at module level for 3D test
-try:
-    import numpy as np
-except:
-    pass 
+print("Adjust iterations in the demo script for faster testing.") 

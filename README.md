@@ -30,7 +30,7 @@ This project demonstrates the fundamental principles of RCS reduction through ge
 cd nighthawk_rcs
 
 # Run automated setup with JAX GPU support
-./setup.sh
+./scripts/setup.sh
 ```
 
 ### Option 2: Manual Installation
@@ -50,9 +50,8 @@ pip install -r requirements.txt
 ### Verify Installation
 
 ```bash
-
 # Test overall installation
-python test_installation.py
+python tests/test_installation.py
 ```
 
 ## Quick Start
@@ -89,21 +88,43 @@ optimizer.visualize_results()
 ```bash
 # 3D optimization demo
 python examples/rcs_3d_optimization_demo.py
+
+# Interactive Jupyter notebook
+jupyter notebook examples/jax_demo.ipynb
+
+# Interactive RCS exploration
+jupyter notebook examples/interactive_rcs_exploration.ipynb
 ```
 
 ## Project Structure
 
 ```
 nighthawk_rcs/
-├── src/                   # Core source code
-│   ├── rcs_calc.py       # RCS calculation module
-│   ├── geometry.py       # Geometry representation
-│   ├── optimization.py   # Optimization algorithms
-│   └── visualization.py  # Visualization tools
-├── examples/             # Example scripts and notebooks
-├── tests/               # Unit tests
-├── docs/                # Additional documentation
-└── visualizations/      # Output visualizations
+├── src/                          # Core source code
+│   ├── rcs_calc_3d.py           # 3D RCS calculation module
+│   ├── geometry_3d.py           # 3D geometry representation
+│   ├── optimization_3d.py       # 3D optimization algorithms
+│   └── visualization_3d.py      # 3D visualization tools
+├── examples/                     # Example scripts and notebooks
+│   ├── rcs_3d_optimization_demo.py
+│   ├── jax_demo.ipynb
+│   └── interactive_rcs_exploration.ipynb
+├── tests/                        # Unit tests
+│   ├── test_installation.py
+│   └── test_optimizations.py
+├── docs/                         # Comprehensive documentation
+│   ├── PROJECT_SUMMARY.md
+│   ├── OPTIMIZATION_SUMMARY.md
+│   └── TODO.md
+├── scripts/                      # Setup and utility scripts
+│   ├── setup.sh
+│   └── install_jax.sh
+├── visualizations/               # Output visualizations
+│   ├── images/                  # PNG/JPG visualization files
+│   ├── html/                    # Interactive HTML plots
+│   └── models/                  # 3D model files (STL, etc.)
+├── config.yaml                   # Configuration file
+└── requirements.txt              # Python dependencies
 ```
 
 ## Physics Background

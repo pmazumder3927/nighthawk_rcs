@@ -9,7 +9,7 @@ import sys
 import os
 
 # Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from geometry_3d import create_simple_shape_3d
 from rcs_calc_3d import RCS3DCalculator
