@@ -96,12 +96,17 @@ class TopologyOptimizer3D:
             weights = weights / np.sum(weights)
             
         # Calculate RCS at each angle
-        rcs_values = []
-        for (theta, phi) in target_angles:
-            rcs = self.rcs_calc.calculate_rcs(geometry.mesh, theta, phi)
-            rcs_values.append(rcs)
-            
-        rcs_values = np.array(rcs_values)
+        # Use batch processing for efficiency (GPU-accelerated when available)
+        theta_angles = np.array([tp[0] for tp in target_angles])
+        phi_angles = np.array([tp[1] for tp in target_angles])
+
+        # Delegates to GPU-accelerated batch routine when possible; gracefully
+        # falls back to CPU inside the calculator implementation.
+        rcs_values = self.rcs_calc.calculate_rcs_batch(
+            geometry.mesh,
+            theta_angles,
+            phi_angles,
+        )
         
         # Weighted mean in linear scale (not dB)
         objective = np.sum(weights * rcs_values)
@@ -246,6 +251,11 @@ class TopologyOptimizer3D:
         gradient = np.zeros((n_control, 3))
         base_obj = self.objective_function(geometry, target_angles)
         
+        # Use JAX automatic differentiation if available and GPU is enabled
+        # JAX autodiff disabled for now due to geometry operation complexity
+        # if jax is not None and self.rcs_calc.use_gpu:
+        #     return self._calculate_gradient_jax(geometry, target_angles, epsilon)
+        
         # Parallel gradient calculation if GPU available
         if GPU_AVAILABLE and self.rcs_calc.use_gpu:
             # Batch process perturbations
@@ -274,6 +284,58 @@ class TopologyOptimizer3D:
                     
                     gradient[i, j] = (perturbed_obj - base_obj) / epsilon
                     
+        return gradient
+        
+    def _calculate_gradient_jax(self, geometry: Geometry3D,
+                               target_angles: Optional[List[Tuple[float, float]]],
+                               epsilon: float = 0.01) -> np.ndarray:
+        """
+        Calculate gradient using JAX automatic differentiation (when available).
+        
+        Returns:
+            Gradient array of shape (n_control_points, 3)
+        """
+        if jax is None:
+            # Fallback to finite differences
+            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
+            
+        try:
+            # For now, JAX autodiff is complex due to geometry operations
+            # Fall back to optimized finite differences
+            print("JAX autodiff not yet fully implemented for geometry operations")
+            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
+            
+        except Exception as e:
+            print(f"JAX gradient calculation failed: {e}")
+            print("Falling back to finite differences")
+            # Fallback to finite differences
+            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
+    
+    def _calculate_gradient_finite_diff(self, geometry: Geometry3D,
+                                       target_angles: Optional[List[Tuple[float, float]]],
+                                       epsilon: float = 0.01) -> np.ndarray:
+        """
+        Calculate gradient using finite differences (fallback method).
+        
+        Returns:
+            Gradient array of shape (n_control_points, 3)
+        """
+        n_control = len(self.control_points)
+        gradient = np.zeros((n_control, 3))
+        base_obj = self.objective_function(geometry, target_angles)
+        
+        # Sequential calculation
+        for i in range(n_control):
+            for j in range(3):
+                disp = np.zeros((n_control, 3))
+                disp[i, j] = epsilon
+                
+                perturbed_geom = geometry.apply_deformation(
+                    self.control_points, disp, self.smoothness)
+                perturbed_obj = self.objective_function(perturbed_geom, target_angles)
+                
+                gradient[i, j] = (perturbed_obj - base_obj) / epsilon
+                
         return gradient
         
     def _apply_constraints(self, displacements: np.ndarray) -> np.ndarray:
