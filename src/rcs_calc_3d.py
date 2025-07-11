@@ -285,7 +285,7 @@ class RCS3DCalculator:
         
         # Phase calculations
         r = face_centers
-        phase = k * (jnp.dot(r, ki_hat) - jnp.dot(r, ks_hat))
+        phase = k * (r @ ki_hat - r @ ks_hat)   # JAX supports @ for batched matvec
         phase = jnp.where(illuminated, phase, 0.0)
         
         # Scattered field contributions
