@@ -1,0 +1,39 @@
+# Core scientific computing
+numpy>=1.21.0
+scipy>=1.7.0
+matplotlib>=3.5.0
+
+# GPU acceleration
+jax>=0.4.0  # JAX for GPU acceleration
+jaxlib>=0.4.0  # JAX library
+# For GPU support, install with: pip install jax[cuda12]
+numba>=0.56.0  # JIT compilation and CUDA kernels
+
+# 3D visualization
+vedo>=2023.4.0  # Modern 3D visualization, easier than Mayavi
+pyvista>=0.42.0  # 3D plotting and mesh visualization
+vtk>=9.0.0
+plotly>=5.0.0
+
+# Optimization libraries
+scikit-optimize>=0.9.0
+pymoo>=0.6.0  # Multi-objective optimization
+nlopt>=2.7.0  # Nonlinear optimization
+
+# Geometry and mesh handling
+trimesh>=3.9.0
+meshio>=5.0.0
+pygmsh>=7.0.0  # Mesh generation
+pyvista>=0.42.0
+
+# Additional utilities
+tqdm>=4.62.0  # Progress bars
+pyyaml>=6.0  # Configuration files
+ipywidgets>=8.0.0  # Interactive controls for Jupyter
+h5py>=3.7.0  # HDF5 support for large data
+
+# Development tools
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0 
+jupyter>=1.0.0  # For notebooks 

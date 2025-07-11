@@ -1,0 +1,32 @@
+# RCS Optimization Configuration
+
+# Radar parameters
+radar:
+  frequency: 10e9  # Hz (10 GHz - X-band)
+  polarization: vertical
+
+# Optimization parameters
+optimization:
+  gradient_descent:
+    iterations: 50
+    learning_rate: 0.2
+    smoothing: 0.5
+    max_displacement: 2.0  # meters
+    
+  evolutionary:
+    population_size: 20
+    generations: 50
+    mutation_rate: 0.15
+    crossover_rate: 0.7
+    
+# Target angles for optimization (degrees)
+target_angles:
+  frontal: [0, 30, 330]  # Focus on front aspect
+  all_aspect: null  # Use null for all angles
+  
+# Visualization settings
+visualization:
+  figure_size: [12, 8]
+  dpi: 150
+  save_animations: true
+  animation_fps: 10 
