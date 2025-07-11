@@ -162,16 +162,11 @@ class TopologyOptimizer3D:
             beta = 0.9
             epsilon = 1e-8
             
-        # Clear history
-        self.history = {
-            'geometries': [copy.deepcopy(geometry)],
-            'rcs_values': [],
-            'objective_values': [self.objective_function(geometry, target_angles)],
-            'iterations': 0,
-            'volume_ratios': [1.0]
-        }
+        # Initialize history
+        initial_objective = self.objective_function(geometry, target_angles)
+        self._initialize_history(geometry, initial_objective)
         
-        print(f"Initial objective: {self.history['objective_values'][0]:.6f}")
+        print(f"Initial objective: {initial_objective:.6f}")
         
         with tqdm(total=n_iterations, desc="3D Optimization") as pbar:
             for iteration in range(n_iterations):
@@ -211,16 +206,11 @@ class TopologyOptimizer3D:
                 # Evaluate
                 obj_value = self.objective_function(geometry, target_angles)
                 
-                # Store history
-                self.history['geometries'].append(copy.deepcopy(geometry))
-                self.history['objective_values'].append(obj_value)
-                self.history['iterations'] = iteration + 1
-                self.history['volume_ratios'].append(geometry.volume / self.initial_volume)
+                # Update history
+                self._update_history(geometry, obj_value, iteration + 1)
                 
-                # Calculate mean RCS for display
-                mean_rcs_linear = obj_value  # Simplified
-                mean_rcs_db = 10 * np.log10(mean_rcs_linear + 1e-10)
-                self.history['rcs_values'].append(mean_rcs_db)
+                # Get RCS in dB for display
+                mean_rcs_db = self.history['rcs_values'][-1]
                 
                 # Adaptive learning rate
                 if iteration > 0 and obj_value > self.history['objective_values'][-2]:
@@ -350,6 +340,35 @@ class TopologyOptimizer3D:
                                  self.max_displacement)
         return displacements
         
+    def _initialize_history(self, initial_geometry: Geometry3D, 
+                           initial_objective: float) -> None:
+        """Initialize optimization history tracking."""
+        self.history = {
+            'geometries': [copy.deepcopy(initial_geometry)],
+            'rcs_values': [],
+            'objective_values': [initial_objective],
+            'iterations': 0,
+            'volume_ratios': [initial_geometry.volume / self.initial_volume]
+        }
+        
+        # Convert initial objective to RCS in dB for display
+        mean_rcs_db = 10 * np.log10(initial_objective + 1e-10)
+        self.history['rcs_values'].append(mean_rcs_db)
+        
+    def _update_history(self, geometry: Geometry3D, objective: float, 
+                       iteration: int, store_geometry: bool = True) -> None:
+        """Update optimization history with new results."""
+        if store_geometry:
+            self.history['geometries'].append(copy.deepcopy(geometry))
+        
+        self.history['objective_values'].append(objective)
+        self.history['iterations'] = iteration
+        self.history['volume_ratios'].append(geometry.volume / self.initial_volume)
+        
+        # Convert objective to RCS in dB for display
+        mean_rcs_db = 10 * np.log10(objective + 1e-10)
+        self.history['rcs_values'].append(mean_rcs_db)
+        
     def _batch_objective_evaluation(self, geometries: List[Geometry3D], 
                                    target_angles: Optional[List[Tuple[float, float]]]) -> np.ndarray:
         """
@@ -420,7 +439,8 @@ class TopologyOptimizer3D:
                                     population_size: int = 15,
                                     target_angles: Optional[List[Tuple[float, float]]] = None,
                                     F: float = 0.8,
-                                    CR: float = 0.9) -> Geometry3D:
+                                    CR: float = 0.9,
+                                    control_points: Optional[np.ndarray] = None) -> Geometry3D:
         """
         JAX-based differential evolution for GPU acceleration.
         
@@ -435,6 +455,7 @@ class TopologyOptimizer3D:
         Returns:
             Optimized geometry
         """
+        self.control_points = control_points
         if not self.rcs_calc.use_gpu or jax is None:
             print("JAX not available or GPU not enabled. Falling back to scipy DE.")
             return self.differential_evolution_3d(initial_geometry, n_generations, population_size, target_angles)
@@ -513,14 +534,9 @@ class TopologyOptimizer3D:
         best_params = population[best_idx].copy()
         best_objective = objectives[best_idx]
         
-        # Initialize history for visualization
-        self.history = {
-            'geometries': [self._create_geometry_from_params(best_params)],
-            'rcs_values': [],
-            'objective_values': [best_objective],
-            'iterations': 0,
-            'volume_ratios': [self._create_geometry_from_params(best_params).volume / self.initial_volume]
-        }
+        # Initialize history
+        initial_geometry = self._create_geometry_from_params(best_params)
+        self._initialize_history(initial_geometry, best_objective)
         
         print("="*60)
         print("JAX DIFFERENTIAL EVOLUTION OPTIMIZATION")
@@ -558,6 +574,14 @@ class TopologyOptimizer3D:
             if objectives[current_best_idx] < best_objective:
                 best_objective = objectives[current_best_idx]
                 best_params = population[current_best_idx].copy()
+                
+            # Store history for visualization (every 5th generation to avoid excessive memory)
+            if generation % 1 == 0 or generation == n_generations - 1:
+                best_geometry = self._create_geometry_from_params(best_params)
+                self._update_history(best_geometry, best_objective, generation + 1)
+            else:
+                # Update iteration count without storing geometry
+                self.history['iterations'] = generation + 1
                 
             # Progress update
             elapsed = time.time() - start_time
@@ -636,6 +660,11 @@ class TopologyOptimizer3D:
         self.target_angles = target_angles
         self.eval_count = 0
         
+        # Initialize history
+        initial_geometry_obj = self._create_geometry_from_params(np.zeros(n_params))
+        initial_objective = self.objective_function(initial_geometry_obj, target_angles)
+        self._initialize_history(initial_geometry_obj, initial_objective)
+        
         def objective_nlopt(x, grad):
             """NLopt objective function."""
             self.eval_count += 1
@@ -649,8 +678,10 @@ class TopologyOptimizer3D:
             
             obj = self.objective_function(geometry, self.target_angles)
             
+            # Store history every 10 evaluations
             if self.eval_count % 10 == 0:
                 print(f"Eval {self.eval_count}: Obj = {obj:.6f}")
+                self._update_history(geometry, obj, self.eval_count)
                 
             return obj
             
@@ -672,5 +703,9 @@ class TopologyOptimizer3D:
             final_displacements,
             smoothing=self.smoothness
         )
+        
+        # Store final solution in history
+        final_objective = self.objective_function(final_geometry, self.target_angles)
+        self._update_history(final_geometry, final_objective, self.eval_count)
         
         return final_geometry 

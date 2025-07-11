@@ -104,31 +104,34 @@ def main():
     optimizer = TopologyOptimizer3D(
         rcs_calc,
         control_points=None,
-        max_displacement=2.0,
-        volume_constraint=False,
+        max_displacement=1,
+        volume_constraint=True,
         smoothness=0.5
     )
     
     # Run optimization
     # print("\n   Running gradient-based optimization (Adam)...")
     print("   This may take several minutes with GPU acceleration...")
-    
     start_time = time.time()
-    
-    # optimized_sphere = optimizer.gradient_descent_3d(
-    #     sphere_geometry,
-    #     n_iterations=100,
-    #     learning_rate=0.05,
-    #     target_angles=target_angles,
-    #     method='adam'
-    # )
-
+    point_1 = [-0.3314209, 12.08416, 0.7076838]
+    point_2 = [-0.4279993, -11.93523, 0.6846433]
+    point_3 = [15.37509, 0.4619147, -0.8158965]
+    point_4 = [-13.2041, -0.30204, 1.977923]
+    control_points = np.array([point_1, point_2, point_3, point_4])
     optimized_sphere = optimizer.jax_differential_evolution_3d(
-        sphere_geometry,
-        n_generations=100,
-        population_size=15,
-        target_angles=target_angles
+        f117_geometry,
+        n_generations=200,
+        population_size=100,
+        target_angles=target_angles,
+        control_points=control_points
     )
+
+    # optimized_sphere = optimizer.jax_differential_evolution_3d(
+    #     sphere_geometry,
+    #     n_generations=100,
+    #     population_size=10,
+    #     target_angles=target_angles
+    # )
     
     elapsed_time = time.time() - start_time
     print(f"\n   Optimization completed in {elapsed_time:.1f} seconds")
