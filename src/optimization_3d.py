@@ -350,29 +350,102 @@ class TopologyOptimizer3D:
                                  self.max_displacement)
         return displacements
         
-    def differential_evolution_3d(self, initial_geometry: Geometry3D,
-                                 n_generations: int = 50,
-                                 population_size: int = 15,
-                                 target_angles: Optional[List[Tuple[float, float]]] = None) -> Geometry3D:
+    def _batch_objective_evaluation(self, geometries: List[Geometry3D], 
+                                   target_angles: Optional[List[Tuple[float, float]]]) -> np.ndarray:
         """
-        Optimize using differential evolution (global optimization).
+        Evaluate objective function for multiple geometries simultaneously using GPU batching.
+        
+        Args:
+            geometries: List of geometries to evaluate
+            target_angles: Target angles for RCS calculation
+            
+        Returns:
+            Array of objective values
+        """
+        if target_angles is None:
+            # Default: sample uniformly on hemisphere
+            theta = np.linspace(30, 150, 7)  # Avoid grazing angles
+            phi = np.linspace(0, 360, 13, endpoint=False)
+            target_angles = [(t, p) for t in theta for p in phi]
+            
+        n_geometries = len(geometries)
+        n_angles = len(target_angles)
+        
+        # Prepare batch data
+        theta_angles = np.array([tp[0] for tp in target_angles])
+        phi_angles = np.array([tp[1] for tp in target_angles])
+        
+        # Create batch arrays: [n_geometries, n_angles]
+        theta_batch = np.tile(theta_angles, (n_geometries, 1))
+        phi_batch = np.tile(phi_angles, (n_geometries, 1))
+        
+        # Flatten for batch processing
+        theta_flat = theta_batch.flatten()
+        phi_flat = phi_batch.flatten()
+        
+        # Calculate RCS for all geometry-angle combinations
+        all_rcs = []
+        for i, geometry in enumerate(geometries):
+            start_idx = i * n_angles
+            end_idx = (i + 1) * n_angles
+            
+            # Extract RCS values for this geometry
+            rcs_values = self.rcs_calc.calculate_rcs_batch(
+                geometry.mesh,
+                theta_flat[start_idx:end_idx],
+                phi_flat[start_idx:end_idx]
+            )
+            all_rcs.append(rcs_values)
+        
+        # Convert to objectives
+        objectives = np.zeros(n_geometries)
+        weights = np.ones(n_angles) / n_angles  # Uniform weights
+        
+        for i, rcs_values in enumerate(all_rcs):
+            # Weighted mean in linear scale
+            objective = np.sum(weights * rcs_values)
+            
+            # Add volume penalty if enabled
+            if self.volume_constraint and hasattr(self, 'initial_volume'):
+                volume_ratio = geometries[i].volume / self.initial_volume
+                volume_penalty = 100 * (volume_ratio - 1.0)**2
+                objective += volume_penalty
+                
+            objectives[i] = objective
+            
+        return objectives
+        
+    def jax_differential_evolution_3d(self, initial_geometry: Geometry3D,
+                                    n_generations: int = 50,
+                                    population_size: int = 15,
+                                    target_angles: Optional[List[Tuple[float, float]]] = None,
+                                    F: float = 0.8,
+                                    CR: float = 0.9) -> Geometry3D:
+        """
+        JAX-based differential evolution for GPU acceleration.
         
         Args:
             initial_geometry: Starting geometry
             n_generations: Number of generations
-            population_size: DE population size
+            population_size: Population size
             target_angles: Target angles
+            F: Differential weight
+            CR: Crossover probability
             
         Returns:
             Optimized geometry
         """
+        if not self.rcs_calc.use_gpu or jax is None:
+            print("JAX not available or GPU not enabled. Falling back to scipy DE.")
+            return self.differential_evolution_3d(initial_geometry, n_generations, population_size, target_angles)
+            
         self.initial_volume = initial_geometry.volume
         
         # Setup control points
         if self.control_points is None:
             n_vertices = len(initial_geometry.mesh.vertices)
             n_control = min(50, max(4, n_vertices // 20))
-            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            n_control = min(n_control, n_vertices)
             indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
@@ -382,90 +455,139 @@ class TopologyOptimizer3D:
         self.base_geometry = initial_geometry
         self.target_angles = target_angles
         
-        def objective_wrapper(x):
-            """Wrapper for scipy optimizer."""
-            displacements = x.reshape(-1, 3)
-            displacements = self._apply_constraints(displacements)
+        @jit
+        def de_step(population, F, CR, key):
+            """Single DE step compiled with JAX."""
+            pop_size, n_dims = population.shape
             
-            # Apply deformation
-            geometry = self.base_geometry.apply_deformation(
-                self.control_points,
-                displacements,
-                smoothing=self.smoothness
-            )
+            # Generate random indices for mutation
+            keys = jax.random.split(key, pop_size)
             
-            return self.objective_function(geometry, self.target_angles)
-            
-        # Bounds
-        bounds = [(-self.max_displacement, self.max_displacement)] * n_params
-        
-        # Setup progress tracking
-        self.de_generation = 0
-        self.best_objective = None
-        self.de_start_time = None
-        
-        def progress_callback(xk, convergence):
-            """Callback function to track DE progress."""
-            if self.de_start_time is None:
-                self.de_start_time = time.time()
-            
-            self.de_generation += 1
-            current_obj = objective_wrapper(xk)
-            
-            if self.best_objective is None or current_obj < self.best_objective:
-                self.best_objective = current_obj
+            def mutate_individual(i, individual_key):
+                # Select three random individuals (different from current)
+                indices = jax.random.choice(individual_key, pop_size, (3,), replace=False)
+                indices = jnp.where(indices == i, (indices + 1) % pop_size, indices)
                 
-            elapsed = time.time() - self.de_start_time
-            print(f"Generation {self.de_generation:3d}/{n_generations}: "
-                  f"Best obj = {self.best_objective:.6f}, "
-                  f"Current = {current_obj:.6f}, "
-                  f"Convergence = {convergence:.6f}, "
-                  f"Elapsed = {elapsed:.1f}s")
+                # Mutation: vi = x[r1] + F * (x[r2] - x[r3])
+                mutant = population[indices[0]] + F * (population[indices[1]] - population[indices[2]])
+                
+                # Crossover
+                cross_key = jax.random.split(individual_key, n_dims)
+                cross_mask = jax.random.uniform(cross_key[0], (n_dims,)) < CR
+                
+                # Ensure at least one dimension is crossed over
+                j_rand = jax.random.randint(cross_key[1], (), 0, n_dims)
+                cross_mask = cross_mask.at[j_rand].set(True)
+                
+                trial = jnp.where(cross_mask, mutant, population[i])
+                
+                # Apply bounds
+                trial = jnp.clip(trial, -self.max_displacement, self.max_displacement)
+                
+                return trial
+                
+            # Vectorized mutation and crossover
+            trials = jax.vmap(mutate_individual)(jnp.arange(pop_size), keys)
             
-        # Print initial setup info
+            return trials
+            
+        # Initialize population
+        key = jax.random.PRNGKey(42)
+        population = jax.random.uniform(
+            key, 
+            (population_size, n_params), 
+            minval=-self.max_displacement, 
+            maxval=self.max_displacement
+        )
+        
+        # Convert to numpy for objective evaluation (since geometry operations aren't in JAX)
+        population = np.array(population)
+        
+        # Evaluate initial population
+        objectives = self._batch_objective_evaluation(
+            [self._create_geometry_from_params(p) for p in population],
+            target_angles
+        )
+        
+        best_idx = np.argmin(objectives)
+        best_params = population[best_idx].copy()
+        best_objective = objectives[best_idx]
+        
+        # Initialize history for visualization
+        self.history = {
+            'geometries': [self._create_geometry_from_params(best_params)],
+            'rcs_values': [],
+            'objective_values': [best_objective],
+            'iterations': 0,
+            'volume_ratios': [self._create_geometry_from_params(best_params).volume / self.initial_volume]
+        }
+        
         print("="*60)
-        print("DIFFERENTIAL EVOLUTION OPTIMIZATION")
+        print("JAX DIFFERENTIAL EVOLUTION OPTIMIZATION")
         print("="*60)
         print(f"Population size: {population_size}")
         print(f"Max generations: {n_generations}")
         print(f"Control points: {len(self.control_points)}")
         print(f"Parameters: {n_params}")
-        print(f"Max displacement: {self.max_displacement}")
-        print(f"Initial volume: {self.initial_volume:.3f}")
+        print(f"F (differential weight): {F}")
+        print(f"CR (crossover rate): {CR}")
+        print(f"Initial best objective: {best_objective:.6f}")
         print("-"*60)
         
-        # Run differential evolution
-        self.de_start_time = time.time()
-        result = differential_evolution(
-            objective_wrapper,
-            bounds,
-            maxiter=n_generations,
-            popsize=population_size,
-            disp=False,  # Turn off scipy's default display
-            callback=progress_callback
-        )
-        
-        # Print final results
-        total_time = time.time() - self.de_start_time
+        # Main evolution loop
+        start_time = time.time()
+        for generation in range(n_generations):
+            # Generate trial population using JAX
+            key, subkey = jax.random.split(key)
+            trials = de_step(jnp.array(population), F, CR, subkey)
+            trials = np.array(trials)
+            
+            # Evaluate trial population
+            trial_objectives = self._batch_objective_evaluation(
+                [self._create_geometry_from_params(p) for p in trials],
+                target_angles
+            )
+            
+            # Selection
+            improved = trial_objectives < objectives
+            population = np.where(improved[:, np.newaxis], trials, population)
+            objectives = np.where(improved, trial_objectives, objectives)
+            
+            # Update best
+            current_best_idx = np.argmin(objectives)
+            if objectives[current_best_idx] < best_objective:
+                best_objective = objectives[current_best_idx]
+                best_params = population[current_best_idx].copy()
+                
+            # Progress update
+            elapsed = time.time() - start_time
+            print(f"Generation {generation+1:3d}/{n_generations}: "
+                  f"Best = {best_objective:.6f}, "
+                  f"Mean = {np.mean(objectives):.6f}, "
+                  f"Std = {np.std(objectives):.6f}, "
+                  f"Elapsed = {elapsed:.1f}s")
+                  
+        total_time = time.time() - start_time
         print("-"*60)
-        print(f"OPTIMIZATION COMPLETE")
+        print(f"JAX DE OPTIMIZATION COMPLETE")
         print(f"Total time: {total_time:.1f}s")
-        print(f"Total generations: {self.de_generation}")
-        print(f"Final objective: {result.fun:.6f}")
-        print(f"Success: {result.success}")
-        if hasattr(result, 'message'):
-            print(f"Message: {result.message}")
+        print(f"Final best objective: {best_objective:.6f}")
         print("="*60)
         
-        # Apply final solution
-        final_displacements = result.x.reshape(-1, 3)
-        final_geometry = self.base_geometry.apply_deformation(
+        # Create final geometry
+        final_geometry = self._create_geometry_from_params(best_params)
+        return final_geometry
+        
+    def _create_geometry_from_params(self, params: np.ndarray) -> Geometry3D:
+        """Create geometry from optimization parameters."""
+        displacements = params.reshape(-1, 3)
+        displacements = self._apply_constraints(displacements)
+        
+        return self.base_geometry.apply_deformation(
             self.control_points,
-            final_displacements,
+            displacements,
             smoothing=self.smoothness
         )
-        
-        return final_geometry
         
     def nlopt_optimization_3d(self, initial_geometry: Geometry3D,
                             algorithm: str = 'COBYLA',

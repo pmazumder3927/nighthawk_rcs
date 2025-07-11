@@ -123,10 +123,10 @@ def main():
     #     method='adam'
     # )
 
-    optimized_sphere = optimizer.differential_evolution_3d(
+    optimized_sphere = optimizer.jax_differential_evolution_3d(
         sphere_geometry,
         n_generations=100,
-        population_size=100,
+        population_size=15,
         target_angles=target_angles
     )
     
