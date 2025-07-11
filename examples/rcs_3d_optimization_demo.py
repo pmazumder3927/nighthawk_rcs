@@ -44,7 +44,7 @@ def main():
     
     # Start with a simple shape for initial testing
     print("   Creating sphere (baseline)...")
-    sphere_geometry = create_simple_shape_3d('cube', size=5.0, subdivisions=2)
+    sphere_geometry = create_simple_shape_3d('sphere', size=5.0, subdivisions=3)
     print(f"   - Vertices: {len(sphere_geometry.mesh.vertices)}")
     print(f"   - Faces: {len(sphere_geometry.mesh.faces)}")
     print(f"   - Volume: {sphere_geometry.volume:.2f} m³")
@@ -103,9 +103,9 @@ def main():
     # Create optimizer
     optimizer = TopologyOptimizer3D(
         rcs_calc,
-        control_points=sphere_geometry.mesh.vertices,
-        max_displacement=100.0,  # Limit deformation
-        volume_constraint=False,
+        control_points=None,
+        max_displacement=2,  # Limit deformation
+        volume_constraint=True,
         smoothness=0.5
     )
     
