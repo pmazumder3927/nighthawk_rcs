@@ -1,4 +1,4 @@
-# Nighthawk RCS Topology Optimization
+# echo 1 on a budget
 
 In the 1970s, Lockheed’s Skunk Works solved a problem no one else could: how to make an aircraft invisible to radar. They used Soviet diffraction theory, handwritten equations, and a Cray supercomputer running primitive code called Echo 1. What they built was ugly, mathematically awkward, and decades ahead of its time. The result was the **F-117 Nighthawk**, the first operational stealth aircraft.
 
