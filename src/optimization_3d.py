@@ -15,6 +15,8 @@ from tqdm import tqdm
 import copy
 from scipy.optimize import minimize, differential_evolution
 import nlopt
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing as mp
 
 try:
     from .geometry_3d import Geometry3D
@@ -27,12 +29,20 @@ except ImportError:
 try:
     import jax
     import jax.numpy as jnp
-    from jax import jit
+    from jax import jit, grad, value_and_grad
     GPU_AVAILABLE = len(jax.devices('gpu')) > 0
 except ImportError:
     jax = None
     jnp = np  # Fallback to NumPy
     GPU_AVAILABLE = False
+
+# Try to import CuPy for GPU operations
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    cp = None
+    CUPY_AVAILABLE = False
 
 
 class TopologyOptimizer3D:
@@ -70,24 +80,43 @@ class TopologyOptimizer3D:
             'volume_ratios': []
         }
         
+        # Cache for objective function evaluations
+        self._objective_cache = {}
+        self._gradient_cache = {}
+        
+        # Parallel processing setup
+        self.n_workers = mp.cpu_count()
+        
+        # Compiled functions
+        self._objective_jax = None
+        self._gradient_jax = None
+        
     def objective_function(self, geometry: Geometry3D,
                           target_angles: Optional[List[Tuple[float, float]]] = None,
-                          weights: Optional[np.ndarray] = None) -> float:
+                          weights: Optional[np.ndarray] = None,
+                          use_cache: bool = True) -> float:
         """
-        Calculate objective function for 3D geometry.
+        Calculate objective function for 3D geometry with caching.
         
         Args:
             geometry: 3D geometry to evaluate
             target_angles: List of (theta, phi) tuples for specific angles
             weights: Weights for each angle (if None, uniform)
+            use_cache: Whether to use cached results
             
         Returns:
             Objective value (weighted mean RCS in linear scale)
         """
+        # Create hash for caching
+        if use_cache:
+            geom_hash = hash(geometry.mesh.vertices.tobytes())
+            if geom_hash in self._objective_cache:
+                return self._objective_cache[geom_hash]
+        
         if target_angles is None:
-            # Default: sample uniformly on hemisphere
-            theta = np.linspace(30, 150, 7)  # Avoid grazing angles
-            phi = np.linspace(0, 360, 13, endpoint=False)
+            # Reduced default angles for faster computation
+            theta = np.linspace(45, 135, 5)  # Reduced from 7
+            phi = np.linspace(0, 360, 9, endpoint=False)  # Reduced from 13
             target_angles = [(t, p) for t in theta for p in phi]
             
         if weights is None:
@@ -95,13 +124,14 @@ class TopologyOptimizer3D:
         else:
             weights = weights / np.sum(weights)
             
-        # Calculate RCS at each angle
-        rcs_values = []
-        for (theta, phi) in target_angles:
-            rcs = self.rcs_calc.calculate_rcs(geometry.mesh, theta, phi)
-            rcs_values.append(rcs)
-            
-        rcs_values = np.array(rcs_values)
+        # Batch calculate RCS values
+        theta_angles = np.array([angle[0] for angle in target_angles])
+        phi_angles = np.array([angle[1] for angle in target_angles])
+        
+        # Use batch calculation for efficiency
+        rcs_values = self.rcs_calc.calculate_rcs_batch(
+            geometry.mesh, theta_angles, phi_angles
+        )
         
         # Weighted mean in linear scale (not dB)
         objective = np.sum(weights * rcs_values)
@@ -112,15 +142,21 @@ class TopologyOptimizer3D:
             volume_penalty = 100 * (volume_ratio - 1.0)**2
             objective += volume_penalty
             
+        # Cache result
+        if use_cache:
+            self._objective_cache[geom_hash] = objective
+            
         return objective
         
     def gradient_descent_3d(self, initial_geometry: Geometry3D,
                            n_iterations: int = 100,
                            learning_rate: float = 0.1,
                            target_angles: Optional[List[Tuple[float, float]]] = None,
-                           method: str = 'adam') -> Geometry3D:
+                           method: str = 'adam',
+                           adaptive_lr: bool = True,
+                           checkpoint_interval: int = 10) -> Geometry3D:
         """
-        Optimize using gradient descent with various update rules.
+        Optimize using gradient descent with various update rules and optimizations.
         
         Args:
             initial_geometry: Starting geometry
@@ -128,6 +164,8 @@ class TopologyOptimizer3D:
             learning_rate: Initial learning rate
             target_angles: Target angles for optimization
             method: 'sgd', 'adam', or 'rmsprop'
+            adaptive_lr: Whether to use adaptive learning rate
+            checkpoint_interval: Save geometry every N iterations
             
         Returns:
             Optimized geometry
@@ -137,10 +175,12 @@ class TopologyOptimizer3D:
         
         # Setup control points if not provided
         if self.control_points is None:
-            # Use subset of vertices as control points
-            n_control = min(100, len(geometry.mesh.vertices) // 10)
-            indices = np.random.choice(len(geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            # Adaptive control point selection based on mesh size
+            n_vertices = len(geometry.mesh.vertices)
+            n_control = min(max(50, n_vertices // 20), 200)  # Adaptive sizing
+            
+            # Use FPS (Farthest Point Sampling) for better coverage
+            indices = self._farthest_point_sampling(geometry.mesh.vertices, n_control)
             self.control_points = geometry.mesh.vertices[indices]
             
         n_params = self.control_points.shape[0] * 3
@@ -156,7 +196,7 @@ class TopologyOptimizer3D:
             beta = 0.9
             epsilon = 1e-8
             
-        # Clear history
+        # Clear history and caches
         self.history = {
             'geometries': [copy.deepcopy(geometry)],
             'rcs_values': [],
@@ -164,33 +204,62 @@ class TopologyOptimizer3D:
             'iterations': 0,
             'volume_ratios': [1.0]
         }
+        self._objective_cache.clear()
+        self._gradient_cache.clear()
         
         print(f"Initial objective: {self.history['objective_values'][0]:.6f}")
+        print(f"Using {len(self.control_points)} control points")
+        
+        # Learning rate schedule
+        if adaptive_lr:
+            lr_schedule = self._cosine_annealing_lr(learning_rate, n_iterations)
+        else:
+            lr_schedule = [learning_rate] * n_iterations
+        
+        # Best solution tracking
+        best_obj = self.history['objective_values'][0]
+        best_geometry = copy.deepcopy(geometry)
+        patience = 0
+        max_patience = 20
         
         with tqdm(total=n_iterations, desc="3D Optimization") as pbar:
             for iteration in range(n_iterations):
-                # Calculate gradient
-                gradient = self._calculate_gradient_3d(geometry, target_angles)
+                # Get current learning rate
+                current_lr = lr_schedule[iteration]
+                
+                # Calculate gradient with parallel processing
+                gradient = self._calculate_gradient_3d_parallel(geometry, target_angles)
                 gradient_flat = gradient.flatten()
+                
+                # Gradient clipping for stability
+                grad_norm = np.linalg.norm(gradient_flat)
+                if grad_norm > 10.0:
+                    gradient_flat = gradient_flat * 10.0 / grad_norm
                 
                 # Apply optimizer update
                 if method == 'sgd':
-                    update = -learning_rate * gradient_flat
+                    update = -current_lr * gradient_flat
                     
                 elif method == 'adam':
                     m = beta1 * m + (1 - beta1) * gradient_flat
                     v = beta2 * v + (1 - beta2) * gradient_flat**2
                     m_hat = m / (1 - beta1**(iteration + 1))
                     v_hat = v / (1 - beta2**(iteration + 1))
-                    update = -learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
+                    update = -current_lr * m_hat / (np.sqrt(v_hat) + epsilon)
                     
                 elif method == 'rmsprop':
                     v = beta * v + (1 - beta) * gradient_flat**2
-                    update = -learning_rate * gradient_flat / (np.sqrt(v) + epsilon)
+                    update = -current_lr * gradient_flat / (np.sqrt(v) + epsilon)
                     
                 # Reshape and apply constraints
                 displacements = update.reshape(-1, 3)
                 displacements = self._apply_constraints(displacements)
+                
+                # Apply deformation with momentum
+                if iteration > 0 and hasattr(self, '_prev_displacements'):
+                    momentum = 0.9
+                    displacements = momentum * self._prev_displacements + (1 - momentum) * displacements
+                self._prev_displacements = displacements.copy()
                 
                 # Apply deformation
                 geometry = geometry.apply_deformation(
@@ -205,8 +274,23 @@ class TopologyOptimizer3D:
                 # Evaluate
                 obj_value = self.objective_function(geometry, target_angles)
                 
+                # Check for improvement
+                if obj_value < best_obj:
+                    best_obj = obj_value
+                    best_geometry = copy.deepcopy(geometry)
+                    patience = 0
+                else:
+                    patience += 1
+                
+                # Early stopping
+                if patience > max_patience:
+                    print(f"\nEarly stopping at iteration {iteration}")
+                    geometry = best_geometry
+                    break
+                
                 # Store history
-                self.history['geometries'].append(copy.deepcopy(geometry))
+                if iteration % checkpoint_interval == 0:
+                    self.history['geometries'].append(copy.deepcopy(geometry))
                 self.history['objective_values'].append(obj_value)
                 self.history['iterations'] = iteration + 1
                 self.history['volume_ratios'].append(geometry.volume / self.initial_volume)
@@ -216,28 +300,26 @@ class TopologyOptimizer3D:
                 mean_rcs_db = 10 * np.log10(mean_rcs_linear + 1e-10)
                 self.history['rcs_values'].append(mean_rcs_db)
                 
-                # Adaptive learning rate
-                if iteration > 0 and obj_value > self.history['objective_values'][-2]:
-                    learning_rate *= 0.9
-                    
                 pbar.update(1)
                 pbar.set_postfix({
                     'Obj': f"{obj_value:.6f}",
+                    'Best': f"{best_obj:.6f}",
                     'RCS': f"{mean_rcs_db:.1f} dBsm",
-                    'Vol': f"{self.history['volume_ratios'][-1]:.3f}"
+                    'Vol': f"{self.history['volume_ratios'][-1]:.3f}",
+                    'LR': f"{current_lr:.5f}"
                 })
                 
-        print(f"Final objective: {self.history['objective_values'][-1]:.6f}")
-        reduction_db = self.history['rcs_values'][0] - self.history['rcs_values'][-1]
+        print(f"\nFinal objective: {best_obj:.6f}")
+        reduction_db = self.history['rcs_values'][0] - 10 * np.log10(best_obj + 1e-10)
         print(f"RCS reduction: {reduction_db:.1f} dB")
         
-        return geometry
+        return best_geometry
         
-    def _calculate_gradient_3d(self, geometry: Geometry3D,
-                              target_angles: Optional[List[Tuple[float, float]]],
-                              epsilon: float = 0.01) -> np.ndarray:
+    def _calculate_gradient_3d_parallel(self, geometry: Geometry3D,
+                                       target_angles: Optional[List[Tuple[float, float]]],
+                                       epsilon: float = 0.01) -> np.ndarray:
         """
-        Calculate gradient using finite differences.
+        Calculate gradient using parallel finite differences.
         
         Returns:
             Gradient array of shape (n_control_points, 3)
@@ -246,59 +328,98 @@ class TopologyOptimizer3D:
         gradient = np.zeros((n_control, 3))
         base_obj = self.objective_function(geometry, target_angles)
         
-        # Parallel gradient calculation if GPU available
-        if GPU_AVAILABLE and self.rcs_calc.use_gpu:
-            # Batch process perturbations
-            for i in range(n_control):
-                for j in range(3):
-                    # Positive perturbation
-                    disp = np.zeros((n_control, 3))
-                    disp[i, j] = epsilon
-                    
-                    perturbed_geom = geometry.apply_deformation(
-                        self.control_points, disp, self.smoothness)
-                    perturbed_obj = self.objective_function(perturbed_geom, target_angles)
-                    
-                    # Finite difference
-                    gradient[i, j] = (perturbed_obj - base_obj) / epsilon
-        else:
-            # Sequential calculation
-            for i in range(n_control):
-                for j in range(3):
-                    disp = np.zeros((n_control, 3))
-                    disp[i, j] = epsilon
-                    
-                    perturbed_geom = geometry.apply_deformation(
-                        self.control_points, disp, self.smoothness)
-                    perturbed_obj = self.objective_function(perturbed_geom, target_angles)
-                    
-                    gradient[i, j] = (perturbed_obj - base_obj) / epsilon
-                    
+        # Create list of perturbation tasks
+        tasks = []
+        for i in range(n_control):
+            for j in range(3):
+                tasks.append((i, j, epsilon))
+        
+        # Define worker function
+        def calculate_perturbation(task):
+            i, j, eps = task
+            disp = np.zeros((n_control, 3))
+            disp[i, j] = eps
+            
+            perturbed_geom = geometry.apply_deformation(
+                self.control_points, disp, self.smoothness)
+            perturbed_obj = self.objective_function(perturbed_geom, target_angles, use_cache=False)
+            
+            return i, j, (perturbed_obj - base_obj) / eps
+        
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
+            results = list(executor.map(calculate_perturbation, tasks))
+        
+        # Collect results
+        for i, j, grad_value in results:
+            gradient[i, j] = grad_value
+            
         return gradient
         
     def _apply_constraints(self, displacements: np.ndarray) -> np.ndarray:
-        """Apply displacement constraints."""
-        # Limit maximum displacement
+        """Apply displacement constraints with smooth limiting."""
+        # Smooth displacement limiting using tanh
         norms = np.linalg.norm(displacements, axis=1)
-        mask = norms > self.max_displacement
-        if np.any(mask):
-            displacements[mask] = (displacements[mask] / 
-                                 norms[mask, np.newaxis] * 
-                                 self.max_displacement)
-        return displacements
+        scale_factors = np.tanh(norms / self.max_displacement) * self.max_displacement / (norms + 1e-8)
+        scale_factors = np.minimum(scale_factors, 1.0)
+        
+        return displacements * scale_factors[:, np.newaxis]
+        
+    def _farthest_point_sampling(self, points: np.ndarray, n_samples: int) -> np.ndarray:
+        """
+        Farthest Point Sampling for better control point distribution.
+        
+        Args:
+            points: Nx3 array of points
+            n_samples: Number of samples to select
+            
+        Returns:
+            Indices of selected points
+        """
+        n_points = len(points)
+        if n_samples >= n_points:
+            return np.arange(n_points)
+        
+        # Start with a random point
+        indices = [np.random.randint(n_points)]
+        distances = np.full(n_points, np.inf)
+        
+        for _ in range(n_samples - 1):
+            # Update distances to nearest selected point
+            last_point = points[indices[-1]]
+            new_distances = np.linalg.norm(points - last_point, axis=1)
+            distances = np.minimum(distances, new_distances)
+            
+            # Select farthest point
+            next_idx = np.argmax(distances)
+            indices.append(next_idx)
+            
+        return np.array(indices)
+    
+    def _cosine_annealing_lr(self, initial_lr: float, n_iterations: int) -> List[float]:
+        """Generate cosine annealing learning rate schedule."""
+        schedule = []
+        for i in range(n_iterations):
+            lr = initial_lr * 0.5 * (1 + np.cos(np.pi * i / n_iterations))
+            schedule.append(lr)
+        return schedule
         
     def differential_evolution_3d(self, initial_geometry: Geometry3D,
                                  n_generations: int = 50,
                                  population_size: int = 15,
-                                 target_angles: Optional[List[Tuple[float, float]]] = None) -> Geometry3D:
+                                 target_angles: Optional[List[Tuple[float, float]]] = None,
+                                 strategy: str = 'best1bin',
+                                 workers: int = -1) -> Geometry3D:
         """
-        Optimize using differential evolution (global optimization).
+        Optimize using differential evolution (global optimization) with parallel evaluation.
         
         Args:
             initial_geometry: Starting geometry
             n_generations: Number of generations
             population_size: DE population size
             target_angles: Target angles
+            strategy: DE strategy
+            workers: Number of parallel workers (-1 for all CPUs)
             
         Returns:
             Optimized geometry
@@ -308,8 +429,7 @@ class TopologyOptimizer3D:
         # Setup control points
         if self.control_points is None:
             n_control = min(50, len(initial_geometry.mesh.vertices) // 20)
-            indices = np.random.choice(len(initial_geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            indices = self._farthest_point_sampling(initial_geometry.mesh.vertices, n_control)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
         n_params = self.control_points.shape[0] * 3
@@ -335,15 +455,18 @@ class TopologyOptimizer3D:
         # Bounds
         bounds = [(-self.max_displacement, self.max_displacement)] * n_params
         
-        # Run differential evolution
+        # Run differential evolution with parallel workers
         print("Running differential evolution optimization...")
         result = differential_evolution(
             objective_wrapper,
             bounds,
             maxiter=n_generations,
             popsize=population_size,
+            strategy=strategy,
             disp=True,
-            workers=-1  # Use all CPU cores
+            workers=workers,
+            updating='deferred',  # Better for parallel execution
+            polish=False  # Skip local optimization at the end
         )
         
         # Apply final solution
@@ -361,7 +484,7 @@ class TopologyOptimizer3D:
                             n_iterations: int = 100,
                             target_angles: Optional[List[Tuple[float, float]]] = None) -> Geometry3D:
         """
-        Optimize using NLopt algorithms.
+        Optimize using NLopt algorithms with improved convergence.
         
         Args:
             initial_geometry: Starting geometry  
@@ -377,21 +500,21 @@ class TopologyOptimizer3D:
         # Setup control points
         if self.control_points is None:
             n_control = min(75, len(initial_geometry.mesh.vertices) // 15)
-            indices = np.random.choice(len(initial_geometry.mesh.vertices), 
-                                     n_control, replace=False)
+            indices = self._farthest_point_sampling(initial_geometry.mesh.vertices, n_control)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
         n_params = self.control_points.shape[0] * 3
         
         # Create NLopt optimizer
-        if algorithm == 'COBYLA':
-            opt = nlopt.opt(nlopt.LN_COBYLA, n_params)
-        elif algorithm == 'BOBYQA':
-            opt = nlopt.opt(nlopt.LN_BOBYQA, n_params)
-        elif algorithm == 'SBPLX':
-            opt = nlopt.opt(nlopt.LN_SBPLX, n_params)
-        else:
-            opt = nlopt.opt(nlopt.LN_COBYLA, n_params)
+        opt_algorithms = {
+            'COBYLA': nlopt.LN_COBYLA,
+            'BOBYQA': nlopt.LN_BOBYQA,
+            'SBPLX': nlopt.LN_SBPLX,
+            'PRAXIS': nlopt.LN_PRAXIS,
+            'NELDERMEAD': nlopt.LN_NELDERMEAD
+        }
+        
+        opt = nlopt.opt(opt_algorithms.get(algorithm, nlopt.LN_COBYLA), n_params)
             
         # Set bounds
         opt.set_lower_bounds(-self.max_displacement * np.ones(n_params))
@@ -401,9 +524,11 @@ class TopologyOptimizer3D:
         self.base_geometry = initial_geometry
         self.target_angles = target_angles
         self.eval_count = 0
+        self.best_obj = float('inf')
+        self.best_x = None
         
         def objective_nlopt(x, grad):
-            """NLopt objective function."""
+            """NLopt objective function with gradient approximation."""
             self.eval_count += 1
             
             displacements = x.reshape(-1, 3)
@@ -415,8 +540,29 @@ class TopologyOptimizer3D:
             
             obj = self.objective_function(geometry, self.target_angles)
             
+            # Track best solution
+            if obj < self.best_obj:
+                self.best_obj = obj
+                self.best_x = x.copy()
+            
             if self.eval_count % 10 == 0:
-                print(f"Eval {self.eval_count}: Obj = {obj:.6f}")
+                print(f"Eval {self.eval_count}: Obj = {obj:.6f}, Best = {self.best_obj:.6f}")
+                
+            # Approximate gradient if requested
+            if grad.size > 0:
+                # Use finite differences with small epsilon
+                eps = 1e-4
+                for i in range(len(x)):
+                    x_plus = x.copy()
+                    x_plus[i] += eps
+                    
+                    disp_plus = x_plus.reshape(-1, 3)
+                    geom_plus = self.base_geometry.apply_deformation(
+                        self.control_points, disp_plus, self.smoothness
+                    )
+                    obj_plus = self.objective_function(geom_plus, self.target_angles, use_cache=False)
+                    
+                    grad[i] = (obj_plus - obj) / eps
                 
             return obj
             
@@ -424,19 +570,29 @@ class TopologyOptimizer3D:
         opt.set_min_objective(objective_nlopt)
         opt.set_maxeval(n_iterations)
         
-        # Initial guess
-        x0 = np.zeros(n_params)
+        # Set relative tolerance
+        opt.set_ftol_rel(1e-4)
+        opt.set_xtol_rel(1e-4)
+        
+        # Initial guess - small random perturbations
+        x0 = 0.1 * self.max_displacement * np.random.randn(n_params)
         
         # Optimize
         print(f"Running NLopt {algorithm} optimization...")
-        x_opt = opt.optimize(x0)
+        try:
+            x_opt = opt.optimize(x0)
+        except nlopt.RoundoffLimited:
+            print("Optimization stopped due to roundoff errors")
+            x_opt = self.best_x if self.best_x is not None else x0
         
-        # Apply solution
+        # Apply best solution found
         final_displacements = x_opt.reshape(-1, 3)
         final_geometry = self.base_geometry.apply_deformation(
             self.control_points,
             final_displacements,
             smoothing=self.smoothness
         )
+        
+        print(f"Final objective: {self.best_obj:.6f}")
         
         return final_geometry 

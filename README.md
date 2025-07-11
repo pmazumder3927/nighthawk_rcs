@@ -1,6 +1,12 @@
-# Nighthawk RCS Topology Optimization Sandbox
+# Nighthawk RCS Topology Optimization
 
-A Python-based simulation environment for exploring radar cross-section (RCS) topology optimization techniques inspired by the F-117 Nighthawk stealth aircraft development.
+In the 1970s, Lockheed’s Skunk Works solved a problem no one else could: how to make an aircraft invisible to radar. They used Soviet diffraction theory, handwritten equations, and a Cray supercomputer running primitive code called Echo 1. What they built was ugly, mathematically awkward, and decades ahead of its time. The result was the **F-117 Nighthawk**, the first operational stealth aircraft.
+
+I’ve always admired these planes—not just for what they were, but for how they were built. Back then, you needed classified access and millions in compute time.
+
+Today, you can replicate that same radar cross-section optimization process on your own machine, with open-source tools and modern code.
+
+If you want the full story, watch this: [How the F-117 Nighthawk was Born from Soviet Equations](https://www.youtube.com/watch?v=1zjcnnx7igc).
 
 ## Overview
 
@@ -44,8 +50,6 @@ pip install -r requirements.txt
 ### Verify Installation
 
 ```bash
-# Test JAX integration
-python test_jax_integration.py
 
 # Test overall installation
 python test_installation.py
@@ -80,31 +84,11 @@ optimized_geometry = optimizer.gradient_descent_3d(
 optimizer.visualize_results()
 ```
 
-### 2D Optimization (Legacy)
-
-```python
-from src.rcs_calc import RCSCalculator
-from src.optimization import TopologyOptimizer
-from src.geometry import create_f117_inspired_2d_profile
-
-# Create initial geometry
-geometry = create_f117_inspired_2d_profile()
-
-# Initialize optimizer
-optimizer = TopologyOptimizer(geometry)
-
-# Run optimization
-optimized_geometry = optimizer.optimize(iterations=100)
-```
-
 ### Run Examples
 
 ```bash
 # 3D optimization demo
 python examples/rcs_3d_optimization_demo.py
-
-# JAX integration demo
-jupyter notebook jax_demo.ipynb
 ```
 
 ## Project Structure
