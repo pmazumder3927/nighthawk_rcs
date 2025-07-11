@@ -331,7 +331,8 @@ def create_conventional_aircraft_3d() -> Geometry3D:
 
 
 def create_simple_shape_3d(shape_type: str = 'sphere', 
-                          size: float = 10.0) -> Geometry3D:
+                          size: float = 10.0,
+                          subdivisions: int = 3) -> Geometry3D:
     """
     Create simple 3D shapes for testing.
     
@@ -343,13 +344,13 @@ def create_simple_shape_3d(shape_type: str = 'sphere',
         Geometry3D object
     """
     if shape_type == 'sphere':
-        mesh = trimesh.creation.icosphere(subdivisions=3, radius=size)
+        mesh = trimesh.creation.icosphere(subdivisions=subdivisions, radius=size)
     elif shape_type == 'cube':
-        mesh = trimesh.creation.box(extents=[size, size, size])
+        mesh = trimesh.creation.box(extents=[size, size, size], subdivisions=subdivisions)
     elif shape_type == 'cone':
-        mesh = trimesh.creation.cone(radius=size, height=2*size)
+        mesh = trimesh.creation.cone(radius=size, height=2*size, subdivisions=subdivisions)
     elif shape_type == 'cylinder':
-        mesh = trimesh.creation.cylinder(radius=size, height=2*size)
+        mesh = trimesh.creation.cylinder(radius=size, height=2*size, subdivisions=subdivisions)
     else:
         raise ValueError(f"Unknown shape type: {shape_type}")
         
