@@ -12,6 +12,7 @@ import numpy as np
 from typing import Optional, Dict, List, Callable, Tuple
 from tqdm import tqdm
 import copy
+import time
 from scipy.optimize import minimize, differential_evolution
 import nlopt
 
@@ -398,15 +399,63 @@ class TopologyOptimizer3D:
         # Bounds
         bounds = [(-self.max_displacement, self.max_displacement)] * n_params
         
+        # Setup progress tracking
+        self.de_generation = 0
+        self.best_objective = None
+        self.de_start_time = None
+        
+        def progress_callback(xk, convergence):
+            """Callback function to track DE progress."""
+            if self.de_start_time is None:
+                self.de_start_time = time.time()
+            
+            self.de_generation += 1
+            current_obj = objective_wrapper(xk)
+            
+            if self.best_objective is None or current_obj < self.best_objective:
+                self.best_objective = current_obj
+                
+            elapsed = time.time() - self.de_start_time
+            print(f"Generation {self.de_generation:3d}/{n_generations}: "
+                  f"Best obj = {self.best_objective:.6f}, "
+                  f"Current = {current_obj:.6f}, "
+                  f"Convergence = {convergence:.6f}, "
+                  f"Elapsed = {elapsed:.1f}s")
+            
+        # Print initial setup info
+        print("="*60)
+        print("DIFFERENTIAL EVOLUTION OPTIMIZATION")
+        print("="*60)
+        print(f"Population size: {population_size}")
+        print(f"Max generations: {n_generations}")
+        print(f"Control points: {len(self.control_points)}")
+        print(f"Parameters: {n_params}")
+        print(f"Max displacement: {self.max_displacement}")
+        print(f"Initial volume: {self.initial_volume:.3f}")
+        print("-"*60)
+        
         # Run differential evolution
-        print("Running differential evolution optimization...")
+        self.de_start_time = time.time()
         result = differential_evolution(
             objective_wrapper,
             bounds,
             maxiter=n_generations,
             popsize=population_size,
-            disp=True
+            disp=False,  # Turn off scipy's default display
+            callback=progress_callback
         )
+        
+        # Print final results
+        total_time = time.time() - self.de_start_time
+        print("-"*60)
+        print(f"OPTIMIZATION COMPLETE")
+        print(f"Total time: {total_time:.1f}s")
+        print(f"Total generations: {self.de_generation}")
+        print(f"Final objective: {result.fun:.6f}")
+        print(f"Success: {result.success}")
+        if hasattr(result, 'message'):
+            print(f"Message: {result.message}")
+        print("="*60)
         
         # Apply final solution
         final_displacements = result.x.reshape(-1, 3)
