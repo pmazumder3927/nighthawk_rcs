@@ -10,7 +10,6 @@ This module implements advanced optimization algorithms for 3D geometries:
 
 import numpy as np
 from typing import Optional, Dict, List, Callable, Tuple
-import trimesh
 from tqdm import tqdm
 import copy
 from scipy.optimize import minimize, differential_evolution

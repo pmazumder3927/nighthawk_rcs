@@ -104,8 +104,8 @@ def main():
     optimizer = TopologyOptimizer3D(
         rcs_calc,
         control_points=None,
-        max_displacement=2,  # Limit deformation
-        volume_constraint=True,
+        max_displacement=2.0,
+        volume_constraint=False,
         smoothness=0.5
     )
     
@@ -117,7 +117,7 @@ def main():
     
     optimized_sphere = optimizer.gradient_descent_3d(
         sphere_geometry,
-        n_iterations=100,  # Reduced for demo
+        n_iterations=100,
         learning_rate=0.05,
         target_angles=target_angles,
         method='adam'

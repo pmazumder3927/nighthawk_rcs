@@ -257,6 +257,7 @@ class RCS3DCalculator:
 
         contributions = proj * face_areas * np.exp(1j * phase)
         scattered_field = contributions.sum()
+        scattered_field *= (self.k / (2 * np.pi))
         
         # Calculate RCS: σ = 4π|Es|²/|Ei|²
         # For far field, |Ei|² = 1 (normalized)
@@ -301,6 +302,7 @@ class RCS3DCalculator:
                         jnp.exp(1j * phase))
         
         scattered_field = jnp.sum(contributions)
+        scattered_field *= (k / (2 * np.pi))
         
         # Calculate RCS
         rcs = 4 * np.pi * jnp.abs(scattered_field)**2
