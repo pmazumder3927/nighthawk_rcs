@@ -248,8 +248,9 @@ class RCS3DCalculator:
         phase[~illuminated] = 0.0
 
         # Scattered field integrand
-        ks_cross_Js = np.cross(ks_hat, Js)  # (N,3)
-        integrand = np.cross(ks_hat, ks_cross_Js)  # (N,3)
+        # Correct: (J_s × k̂_s) × k̂_s for transverse component
+        Js_cross_ks = np.cross(Js, ks_hat)  # (N,3)
+        integrand = np.cross(Js_cross_ks, ks_hat)  # (N,3)
 
         # Projection onto receiving polarization and aggregation
         proj = integrand.dot(Es_hat)  # (N,)
@@ -289,8 +290,9 @@ class RCS3DCalculator:
         phase = jnp.where(illuminated, phase, 0.0)
         
         # Scattered field contributions
-        ks_cross_Js = jnp.cross(ks_hat, Js)
-        integrand = jnp.cross(ks_hat, ks_cross_Js)
+        # Correct: (J_s × k̂_s) × k̂_s for transverse component
+        Js_cross_ks = jnp.cross(Js, ks_hat)
+        integrand = jnp.cross(Js_cross_ks, ks_hat)
         
         # Project onto receiving polarization
         proj = jnp.sum(integrand * Es_hat, axis=1)
@@ -304,7 +306,7 @@ class RCS3DCalculator:
         scattered_field = jnp.sum(contributions)
         scattered_field *= (k / (2 * np.pi))
         
-        # Calculate RCS
+        # Calculate RCS: σ = 4π|Es|²/|Ei|²
         rcs = 4 * np.pi * jnp.abs(scattered_field)**2
         
         return rcs

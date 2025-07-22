@@ -217,3 +217,5 @@ Thumbs.db
 config_local.yaml
 .env.local
 secrets.yaml
+examples/visualizations/optimized_sphere.stl
+visualizations/optimized_sphere.stl
