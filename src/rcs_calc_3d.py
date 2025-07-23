@@ -190,16 +190,20 @@ class RCS3DCalculator:
         phi_rad = np.deg2rad(phi)
         
         # Calculate all directions
+        # Flatten to ensure we work with 1D arrays
+        theta_rad_flat = theta_rad.flatten()
+        phi_rad_flat = phi_rad.flatten()
+        
         ki_hat = -np.column_stack([
-            np.sin(theta_rad) * np.cos(phi_rad),
-            np.sin(theta_rad) * np.sin(phi_rad),
-            np.cos(theta_rad)
-        ]).reshape(-1, 3)
+            np.sin(theta_rad_flat) * np.cos(phi_rad_flat),
+            np.sin(theta_rad_flat) * np.sin(phi_rad_flat),
+            np.cos(theta_rad_flat)
+        ])
         ks_hat = -ki_hat
         
         # Polarization vectors
-        mask_zero = theta_rad.flatten() < 1e-6
-        n_angles = len(theta_rad.flatten())
+        mask_zero = theta_rad_flat < 1e-6
+        n_angles = len(theta_rad_flat)
         
         theta_hat = np.zeros((n_angles, 3))
         phi_hat = np.zeros((n_angles, 3))
@@ -209,16 +213,14 @@ class RCS3DCalculator:
         phi_hat[mask_zero] = [0, 1, 0]
         
         # Away from theta=0
-        theta_flat = theta_rad.flatten()
-        phi_flat = phi_rad.flatten()
         theta_hat[~mask_zero] = np.column_stack([
-            np.cos(theta_flat[~mask_zero]) * np.cos(phi_flat[~mask_zero]),
-            np.cos(theta_flat[~mask_zero]) * np.sin(phi_flat[~mask_zero]),
-            -np.sin(theta_flat[~mask_zero])
+            np.cos(theta_rad_flat[~mask_zero]) * np.cos(phi_rad_flat[~mask_zero]),
+            np.cos(theta_rad_flat[~mask_zero]) * np.sin(phi_rad_flat[~mask_zero]),
+            -np.sin(theta_rad_flat[~mask_zero])
         ])
         phi_hat[~mask_zero] = np.column_stack([
-            -np.sin(phi_flat[~mask_zero]),
-            np.cos(phi_flat[~mask_zero]),
+            -np.sin(phi_rad_flat[~mask_zero]),
+            np.cos(phi_rad_flat[~mask_zero]),
             np.zeros(np.sum(~mask_zero))
         ])
         
@@ -226,7 +228,7 @@ class RCS3DCalculator:
         Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
         Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
         
-        # Convert to JAX arrays and calculate
+        # Convert to JAX arrays
         ki_hat_jax = jnp.asarray(ki_hat)
         ks_hat_jax = jnp.asarray(ks_hat)
         Ei_hat_jax = jnp.asarray(Ei_hat)
@@ -261,6 +263,16 @@ class RCS3DCalculator:
         Returns:
             theta_grid, phi_grid, rcs_db: 2D arrays for plotting
         """
+        # Check if object is electrically large
+        max_dimension = np.max(mesh.bounds[1] - mesh.bounds[0])
+        ka = self.k * max_dimension / 2
+        
+        if ka > 100 and (n_theta < 181 or n_phi < 361):
+            print(f"\n⚠️  ANGULAR SAMPLING WARNING:")
+            print(f"   Object is electrically large (ka={ka:.1f})")
+            print(f"   Current sampling: {n_theta}x{n_phi} may cause aliasing artifacts")
+            print(f"   Recommended: At least 181x361 points for smooth visualization")
+            print(f"   Or use calculate_rcs_stationary_phase() for faster computation\n")
         # Create angle grids
         theta = np.linspace(theta_range[0], theta_range[1], n_theta)
         phi = np.linspace(phi_range[0], phi_range[1], n_phi)
