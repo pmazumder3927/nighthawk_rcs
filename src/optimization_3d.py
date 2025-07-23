@@ -289,7 +289,9 @@ class TopologyOptimizer3D:
                                  F: float = 0.8,
                                  CR: float = 0.9) -> Geometry3D:
         """
-        JAX-accelerated differential evolution optimization.
+        JAX-accelerated differential evolution with batched population evaluation.
+        
+        This version evaluates the entire population in parallel on GPU for maximum performance.
         
         Args:
             initial_geometry: Starting geometry
@@ -317,6 +319,18 @@ class TopologyOptimizer3D:
         # Store reference for objective function
         self.base_geometry = initial_geometry
         self.target_angles = target_angles
+        
+        # Prepare angles for batched evaluation
+        if target_angles is None:
+            theta = np.linspace(30, 150, 7)
+            phi = np.linspace(0, 360, 13, endpoint=False)
+            target_angles = [(t, p) for t in theta for p in phi]
+            
+        theta_angles = np.array([angle[0] for angle in target_angles])
+        phi_angles = np.array([angle[1] for angle in target_angles])
+        
+        # Precompute mesh invariants
+        self.rcs_calc._prepare_mesh_data(initial_geometry.mesh)
         
         # JIT compile DE step
         @jit
@@ -355,6 +369,45 @@ class TopologyOptimizer3D:
             
             return trials
             
+        # Batched geometry creation and RCS evaluation
+        def evaluate_population_batch(params_batch):
+            """Evaluate entire population in batch."""
+            # Create all geometries at once
+            geometries = []
+            meshes = []
+            for params in params_batch:
+                displacements = params.reshape(-1, 3)
+                displacements = self._apply_constraints(displacements)
+                geometry = self.base_geometry.apply_deformation(
+                    self.control_points,
+                    displacements,
+                    smoothing=self.smoothness
+                )
+                geometries.append(geometry)
+                meshes.append(geometry.mesh)
+            
+            # Batch RCS calculations for entire population at once
+            all_rcs_values = self.rcs_calc.calculate_rcs_population(
+                meshes,
+                theta_angles,
+                phi_angles
+            )
+            
+            # all_rcs_values shape: (pop_size, n_angles)
+            
+            # Compute weighted mean for each population member
+            weights = np.ones(len(target_angles)) / len(target_angles)
+            objectives = np.sum(all_rcs_values * weights, axis=1)
+            
+            # Add volume penalty if enabled
+            if self.volume_constraint:
+                for i, geom in enumerate(geometries):
+                    volume_ratio = geom.volume / self.initial_volume
+                    volume_penalty = 100 * (volume_ratio - 1.0)**2
+                    objectives[i] += volume_penalty
+                    
+            return objectives, geometries
+            
         # Initialize population
         key = jax.random.PRNGKey(42)
         population = jax.random.uniform(
@@ -367,22 +420,20 @@ class TopologyOptimizer3D:
         # Convert to numpy for objective evaluation
         population = np.array(population)
         
-        # Evaluate initial population
-        objectives = np.array([
-            self.objective_function(self._create_geometry_from_params(p), target_angles)
-            for p in population
-        ])
+        # Evaluate initial population in batch
+        print("Evaluating initial population (batched)...")
+        objectives, geometries = evaluate_population_batch(population)
         
         best_idx = np.argmin(objectives)
         best_params = population[best_idx].copy()
         best_objective = objectives[best_idx]
         
         # Initialize history
-        initial_geometry = self._create_geometry_from_params(best_params)
+        initial_geometry = geometries[best_idx]
         self._initialize_history(initial_geometry, best_objective)
         
         print("="*60)
-        print("DIFFERENTIAL EVOLUTION OPTIMIZATION")
+        print("JAX DIFFERENTIAL EVOLUTION (BATCHED)")
         print("="*60)
         print(f"Population size: {population_size}")
         print(f"Max generations: {n_generations}")
@@ -395,21 +446,25 @@ class TopologyOptimizer3D:
         # Main evolution loop
         start_time = time.time()
         for generation in range(n_generations):
+            gen_start = time.time()
+            
             # Generate trial population using JAX
             key, subkey = jax.random.split(key)
             trials = de_step(jnp.array(population), F, CR, subkey)
             trials = np.array(trials)
             
-            # Evaluate trial population
-            trial_objectives = np.array([
-                self.objective_function(self._create_geometry_from_params(p), target_angles)
-                for p in trials
-            ])
+            # Evaluate trial population in batch
+            trial_objectives, trial_geometries = evaluate_population_batch(trials)
             
             # Selection
             improved = trial_objectives < objectives
             population = np.where(improved[:, np.newaxis], trials, population)
             objectives = np.where(improved, trial_objectives, objectives)
+            
+            # Update geometries for improved solutions
+            for i in range(population_size):
+                if improved[i]:
+                    geometries[i] = trial_geometries[i]
             
             # Update best
             current_best_idx = np.argmin(objectives)
@@ -418,20 +473,22 @@ class TopologyOptimizer3D:
                 best_params = population[current_best_idx].copy()
                 
             # Store history every generation
-            best_geometry = self._create_geometry_from_params(best_params)
-            self._update_history(best_geometry, best_objective, generation + 1)
+            self._update_history(geometries[current_best_idx], best_objective, generation + 1)
                 
-            # Progress update every generation
+            # Progress update
+            gen_time = time.time() - gen_start
             elapsed = time.time() - start_time
             print(f"Generation {generation+1:3d}/{n_generations}: "
                   f"Best = {best_objective:.6f}, "
                   f"Mean = {np.mean(objectives):.6f}, "
-                  f"Time = {elapsed:.1f}s")
+                  f"Gen time = {gen_time:.2f}s, "
+                  f"Total = {elapsed:.1f}s")
                       
         total_time = time.time() - start_time
         print("-"*60)
         print(f"Optimization complete in {total_time:.1f}s")
         print(f"Final best objective: {best_objective:.6f}")
+        print(f"Average time per generation: {total_time/n_generations:.2f}s")
         
         # Create final geometry
         final_geometry = self._create_geometry_from_params(best_params)
@@ -497,7 +554,7 @@ class TopologyOptimizer3D:
         initial_objective = self.objective_function(initial_geometry, target_angles)
         self._initialize_history(initial_geometry, initial_objective)
         
-        def objective_nlopt(x, grad):
+        def objective_nlopt(x, grad=None):
             """NLopt objective function."""
             self.eval_count += 1
             

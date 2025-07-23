@@ -17,8 +17,7 @@ import time
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.geometry_3d import (create_f117_inspired_3d, create_conventional_aircraft_3d,
-                            create_simple_shape_3d, Geometry3D)
+from src.geometry_3d import create_f117_inspired_3d, create_simple_shape_3d
 from src.rcs_calc_3d import RCS3DCalculator
 from src.optimization_3d import TopologyOptimizer3D
 from src.visualization_3d import RCSVisualizer3D
@@ -110,8 +109,8 @@ def main():
     )
     
     # Run optimization
-    print("\n   Running differential evolution optimization...")
-    print("   This may take several minutes with GPU acceleration...")
+    print("\n   Running differential evolution optimization (GPU batched)...")
+    print("   This will use GPU acceleration for population evaluation...")
     start_time = time.time()
     optimized_sphere = optimizer.differential_evolution_3d(
         sphere_geometry,
@@ -119,13 +118,6 @@ def main():
         population_size=20,  # Reduced for demo
         target_angles=target_angles,
     )
-
-    # optimized_sphere = optimizer.jax_differential_evolution_3d(
-    #     sphere_geometry,
-    #     n_generations=100,
-    #     population_size=10,
-    #     target_angles=target_angles
-    # )
     
     elapsed_time = time.time() - start_time
     print(f"\n   Optimization completed in {elapsed_time:.1f} seconds")

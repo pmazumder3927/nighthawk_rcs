@@ -9,7 +9,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap
-from typing import Tuple
+from typing import Tuple, List
 import trimesh
 from functools import partial
 
@@ -260,6 +260,188 @@ class RCS3DCalculator:
         
         return theta_grid, phi_grid, rcs_db
     
+    
+    def calculate_rcs_population(self, meshes: List[trimesh.Trimesh],
+                                theta, phi,
+                                polarization: str = 'VV') -> np.ndarray:
+        """
+        Calculate RCS for a population of meshes in batch.
+        
+        This method efficiently evaluates RCS for multiple meshes at the same angles,
+        maximizing GPU utilization by batching all calculations together.
+        
+        Args:
+            meshes: List of 3D mesh objects
+            theta: Elevation angle(s) in degrees
+            phi: Azimuth angle(s) in degrees  
+            polarization: 'VV', 'HH', 'VH', or 'HV'
+            
+        Returns:
+            Array of shape (n_meshes, n_angles) with RCS values
+        """
+        n_meshes = len(meshes)
+        
+        # Convert angles to arrays
+        theta = np.atleast_1d(np.asarray(theta))
+        phi = np.atleast_1d(np.asarray(phi))
+        n_angles = len(theta.flatten())
+        
+        # Convert angles to radians
+        theta_rad = np.deg2rad(theta).flatten()
+        phi_rad = np.deg2rad(phi).flatten()
+        
+        # Calculate directions and polarizations (same for all meshes)
+        ki_hat = -np.column_stack([
+            np.sin(theta_rad) * np.cos(phi_rad),
+            np.sin(theta_rad) * np.sin(phi_rad),
+            np.cos(theta_rad)
+        ])
+        ks_hat = -ki_hat
+        
+        # Polarization vectors
+        mask_zero = theta_rad < 1e-6
+        theta_hat = np.zeros((n_angles, 3))
+        phi_hat = np.zeros((n_angles, 3))
+        
+        theta_hat[mask_zero] = [1, 0, 0]
+        phi_hat[mask_zero] = [0, 1, 0]
+        
+        theta_hat[~mask_zero] = np.column_stack([
+            np.cos(theta_rad[~mask_zero]) * np.cos(phi_rad[~mask_zero]),
+            np.cos(theta_rad[~mask_zero]) * np.sin(phi_rad[~mask_zero]),
+            -np.sin(theta_rad[~mask_zero])
+        ])
+        phi_hat[~mask_zero] = np.column_stack([
+            -np.sin(phi_rad[~mask_zero]),
+            np.cos(phi_rad[~mask_zero]),
+            np.zeros(np.sum(~mask_zero))
+        ])
+        
+        # Set polarizations
+        Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
+        Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
+        
+        # Prepare all mesh data
+        all_centers = []
+        all_normals = []
+        all_areas = []
+        face_counts = []
+        
+        for mesh in meshes:
+            # Compute mesh properties
+            face_centers = mesh.vertices[mesh.faces].mean(axis=1)
+            face_normals = mesh.face_normals
+            
+            # Face areas using cross product
+            v0 = mesh.vertices[mesh.faces[:, 0]]
+            v1 = mesh.vertices[mesh.faces[:, 1]]
+            v2 = mesh.vertices[mesh.faces[:, 2]]
+            face_areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
+            
+            all_centers.append(face_centers)
+            all_normals.append(face_normals)
+            all_areas.append(face_areas)
+            face_counts.append(len(face_centers))
+            
+        # Stack mesh data with padding for uniform size
+        max_faces = max(face_counts)
+        
+        # Pad mesh data to uniform size
+        padded_centers = np.zeros((n_meshes, max_faces, 3))
+        padded_normals = np.zeros((n_meshes, max_faces, 3))
+        padded_areas = np.zeros((n_meshes, max_faces))
+        valid_mask = np.zeros((n_meshes, max_faces), dtype=bool)
+        
+        for i, (centers, normals, areas, n_faces) in enumerate(
+            zip(all_centers, all_normals, all_areas, face_counts)):
+            padded_centers[i, :n_faces] = centers
+            padded_normals[i, :n_faces] = normals
+            padded_areas[i, :n_faces] = areas
+            valid_mask[i, :n_faces] = True
+            
+        # Convert to JAX arrays
+        centers_jax = jnp.asarray(padded_centers)
+        normals_jax = jnp.asarray(padded_normals)
+        areas_jax = jnp.asarray(padded_areas)
+        valid_jax = jnp.asarray(valid_mask)
+        
+        ki_hat_jax = jnp.asarray(ki_hat)
+        ks_hat_jax = jnp.asarray(ks_hat)
+        Ei_hat_jax = jnp.asarray(Ei_hat)
+        Es_hat_jax = jnp.asarray(Es_hat)
+        
+        # Define population RCS calculation
+        @jit
+        def calculate_population_rcs(centers, normals, areas, valid_mask,
+                                   ki_hats, ks_hats, Ei_hats, Es_hats):
+            """Calculate RCS for all meshes and angles in parallel."""
+            n_meshes = centers.shape[0]
+            n_angles = ki_hats.shape[0]
+            
+            # Vectorize over meshes and angles
+            def single_mesh_all_angles(mesh_idx):
+                mesh_centers = centers[mesh_idx]
+                mesh_normals = normals[mesh_idx]
+                mesh_areas = areas[mesh_idx]
+                mesh_valid = valid_mask[mesh_idx]
+                
+                def single_angle(angle_idx):
+                    ki_hat = ki_hats[angle_idx]
+                    ks_hat = ks_hats[angle_idx]
+                    Ei_hat = Ei_hats[angle_idx]
+                    Es_hat = Es_hats[angle_idx]
+                    
+                    # Check illumination
+                    cos_theta_i = jnp.dot(mesh_normals, -ki_hat)
+                    illuminated = (cos_theta_i > 0) & mesh_valid
+                    
+                    # Incident magnetic field
+                    Hi = jnp.cross(ki_hat, Ei_hat) / self.eta
+                    
+                    # Surface currents
+                    Js = 2 * jnp.cross(mesh_normals, Hi)
+                    Js = jnp.where(illuminated[:, None], Js, 0.0)
+                    
+                    # Phase calculation
+                    phase = self.k * (jnp.dot(mesh_centers, ki_hat) - 
+                                     jnp.dot(mesh_centers, ks_hat))
+                    phase = jnp.where(illuminated, phase, 0.0)
+                    
+                    # Project and integrate
+                    proj = jnp.sum(Js * Es_hat, axis=1)
+                    proj = jnp.where(illuminated, proj, 0.0)
+                    
+                    contributions = proj * mesh_areas * jnp.exp(1j * phase)
+                    scattered_field = jnp.sum(contributions)
+                    
+                    # Apply PO normalization
+                    scattered_field *= (self.k * self.eta) / (4 * jnp.pi)
+                    
+                    # Calculate RCS
+                    rcs = 4 * jnp.pi * jnp.abs(scattered_field)**2
+                    
+                    return rcs
+                
+                # Vectorize over angles
+                return vmap(single_angle)(jnp.arange(n_angles))
+            
+            # Vectorize over meshes
+            return vmap(single_mesh_all_angles)(jnp.arange(n_meshes))
+        
+        # Calculate RCS for all meshes and angles
+        rcs_values = calculate_population_rcs(
+            centers_jax, normals_jax, areas_jax, valid_jax,
+            ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax
+        )
+        
+        # Convert back to numpy and reshape
+        rcs_values = np.array(rcs_values)  # Shape: (n_meshes, n_angles)
+        
+        # Reshape to match input angle shape
+        if theta.ndim > 1:
+            rcs_values = rcs_values.reshape(n_meshes, *theta.shape)
+            
+        return rcs_values
     
     def clear_cache(self):
         """Clear cached mesh data and compiled functions."""
