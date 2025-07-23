@@ -249,8 +249,8 @@ class RCS3DCalculator:
 
         # Scattered field integrand
         # Correct: (J_s × k̂_s) × k̂_s for transverse component
-        Js_cross_ks = np.cross(Js, ks_hat)  # (N,3)
-        integrand = np.cross(Js_cross_ks, ks_hat)  # (N,3)
+        Js_cross_ks = np.cross(ks_hat, Js)  # (N,3)
+        integrand = np.cross(ks_hat, Js_cross_ks)  # (N,3)
 
         # Projection onto receiving polarization and aggregation
         proj = integrand.dot(Es_hat)  # (N,)
@@ -291,8 +291,8 @@ class RCS3DCalculator:
         
         # Scattered field contributions
         # Correct: (J_s × k̂_s) × k̂_s for transverse component
-        Js_cross_ks = jnp.cross(Js, ks_hat)
-        integrand = jnp.cross(Js_cross_ks, ks_hat)
+        Js_cross_ks = jnp.cross(ks_hat, Js)
+        integrand = jnp.cross(ks_hat, Js_cross_ks)
         
         # Project onto receiving polarization
         proj = jnp.sum(integrand * Es_hat, axis=1)
