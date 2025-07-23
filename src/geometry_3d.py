@@ -207,6 +207,113 @@ class Geometry3D:
     def scale_factor(self) -> float:
         """Get the scale factor (largest dimension)."""
         return np.max(self.bounds[1] - self.bounds[0])
+    
+    def refine_mesh(self, target_edge_length: Optional[float] = None, 
+                    max_faces: int = 100000, subdivisions: int = 1) -> 'Geometry3D':
+        """
+        Refine mesh to achieve better resolution for RCS calculations.
+        
+        Args:
+            target_edge_length: Target maximum edge length (default: wavelength/10)
+            max_faces: Maximum number of faces allowed
+            subdivisions: Number of subdivision iterations to apply
+            
+        Returns:
+            New Geometry3D with refined mesh
+        """
+        refined_mesh = self.mesh.copy()
+        
+        # Apply subdivision
+        for _ in range(subdivisions):
+            if len(refined_mesh.faces) * 4 > max_faces:
+                print(f"Warning: Stopping refinement to avoid exceeding {max_faces} faces")
+                break
+            refined_mesh = refined_mesh.subdivide()
+        
+        # If target edge length specified, check if further refinement needed
+        if target_edge_length is not None:
+            edge_lengths = refined_mesh.edges_unique_length
+            max_edge = np.max(edge_lengths)
+            
+            if max_edge > target_edge_length * 1.5:
+                print(f"Warning: Maximum edge length {max_edge:.3f} exceeds target {target_edge_length:.3f}")
+                print("Consider increasing subdivisions or using remesh_to_target_edge_length()")
+        
+        return Geometry3D(refined_mesh)
+    
+    def remesh_to_target_edge_length(self, target_edge_length: float, 
+                                    method: str = 'subdivision') -> 'Geometry3D':
+        """
+        Remesh to achieve specific edge length for wavelength-based requirements.
+        
+        Args:
+            target_edge_length: Target edge length (typically wavelength/10)
+            method: 'subdivision' or 'remesh'
+            
+        Returns:
+            New Geometry3D with refined mesh
+        """
+        if method == 'subdivision':
+            # Estimate required subdivisions
+            current_max_edge = np.max(self.mesh.edges_unique_length)
+            subdivisions = int(np.ceil(np.log2(current_max_edge / target_edge_length)))
+            return self.refine_mesh(target_edge_length=target_edge_length, 
+                                  subdivisions=subdivisions)
+        else:
+            # Use trimesh remeshing
+            vertices, faces = trimesh.remesh.subdivide_to_size(
+                self.mesh.vertices, 
+                self.mesh.faces,
+                max_edge=target_edge_length
+            )
+            new_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+            return Geometry3D(new_mesh)
+    
+    def check_mesh_resolution(self, wavelength: float) -> dict:
+        """
+        Check if mesh resolution is adequate for given wavelength.
+        
+        Args:
+            wavelength: Electromagnetic wavelength
+            
+        Returns:
+            Dictionary with mesh quality metrics
+        """
+        edge_lengths = self.mesh.edges_unique_length
+        max_edge = np.max(edge_lengths)
+        mean_edge = np.mean(edge_lengths)
+        
+        # Electrical size
+        max_dimension = self.scale_factor
+        ka = 2 * np.pi * max_dimension / wavelength
+        
+        # Resolution metrics
+        edges_per_wavelength = wavelength / max_edge
+        recommended_edge_length = wavelength / 10
+        
+        quality = {
+            'max_edge_length': max_edge,
+            'mean_edge_length': mean_edge,
+            'wavelength': wavelength,
+            'edges_per_wavelength': edges_per_wavelength,
+            'recommended_edge_length': recommended_edge_length,
+            'electrical_size_ka': ka,
+            'is_electrically_large': ka > 10,
+            'resolution_adequate': edges_per_wavelength >= 10,
+            'num_faces': len(self.mesh.faces),
+            'num_vertices': len(self.mesh.vertices)
+        }
+        
+        # Add warnings
+        if ka > 10 and edges_per_wavelength < 10:
+            quality['warning'] = (f"Mesh too coarse for electrically large object! "
+                                f"ka={ka:.1f}, only {edges_per_wavelength:.1f} edges per wavelength. "
+                                f"Recommend edge length < {recommended_edge_length:.3f}m")
+        elif ka > 100:
+            quality['warning'] = (f"Object is very electrically large (ka={ka:.1f}). "
+                                f"Consider using high-frequency approximations.")
+        
+        return quality
 
 
 def create_f117_inspired_3d() -> Geometry3D:

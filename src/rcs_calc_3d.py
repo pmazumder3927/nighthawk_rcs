@@ -9,7 +9,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import trimesh
 from functools import partial
 
@@ -24,17 +24,19 @@ class RCS3DCalculator:
     - RCS: σ = 4π|E_s|²/|E_i|²
     """
     
-    def __init__(self, frequency: float = 10e9):
+    def __init__(self, frequency: float = 10e9, check_mesh_quality: bool = True):
         """
         Initialize 3D RCS calculator.
         
         Args:
             frequency: Radar frequency in Hz
+            check_mesh_quality: Whether to automatically check mesh resolution
         """
         self.frequency = frequency
         self.wavelength = 3e8 / frequency
         self.k = 2 * np.pi / self.wavelength
         self.eta = 377.0  # Impedance of free space
+        self.check_mesh_quality = check_mesh_quality
         
         # Check if GPU is available
         self.device = jax.devices()[0]
@@ -59,6 +61,19 @@ class RCS3DCalculator:
         mesh_hash = hash((mesh.vertices.tobytes(), mesh.faces.tobytes()))
         
         if self._cached_mesh_hash != mesh_hash:
+            # Check mesh quality if enabled
+            if self.check_mesh_quality:
+                from src.geometry_3d import Geometry3D
+                geom = Geometry3D(mesh)
+                quality = geom.check_mesh_resolution(self.wavelength)
+                
+                if 'warning' in quality:
+                    print(f"\n⚠️  MESH QUALITY WARNING:")
+                    print(f"   {quality['warning']}")
+                    print(f"   Current: {quality['num_faces']} faces, max edge = {quality['max_edge_length']:.3f}m")
+                    print(f"   Recommend: edge length < {quality['recommended_edge_length']:.3f}m")
+                    print(f"   Consider using geometry.refine_mesh() or remesh_to_target_edge_length()\n")
+            
             # Compute mesh properties
             face_centers = mesh.vertices[mesh.faces].mean(axis=1)
             face_normals = mesh.face_normals
@@ -133,7 +148,7 @@ class RCS3DCalculator:
         scattered_field = jnp.sum(contributions)
         
         # Apply PO normalization: E_s = (jkη/4π) × integral
-        scattered_field *= (k * eta) / (4 * jnp.pi)
+        scattered_field *= 1j * k * eta / (4 * jnp.pi)
         
         # Calculate RCS: σ = 4π|E_s|²
         rcs = 4 * jnp.pi * jnp.abs(scattered_field)**2
@@ -415,7 +430,7 @@ class RCS3DCalculator:
                     scattered_field = jnp.sum(contributions)
                     
                     # Apply PO normalization
-                    scattered_field *= (self.k * self.eta) / (4 * jnp.pi)
+                    scattered_field *= 1j * self.k * self.eta / (4 * jnp.pi)
                     
                     # Calculate RCS
                     rcs = 4 * jnp.pi * jnp.abs(scattered_field)**2
@@ -448,3 +463,115 @@ class RCS3DCalculator:
         self._cached_mesh_hash = None
         self._mesh_data = None
         self._rcs_func = None
+    
+    def calculate_rcs_stationary_phase(self, mesh: trimesh.Trimesh,
+                                     theta, phi,
+                                     polarization: str = 'VV') -> np.ndarray:
+        """
+        Calculate RCS using stationary phase approximation for very large objects.
+        
+        This method is more efficient for electrically very large objects (ka >> 100)
+        where the standard PO calculation becomes expensive and the stationary phase
+        points dominate the integral.
+        
+        The method identifies surface points where the phase is stationary
+        (specular reflection points) and evaluates the integral asymptotically.
+        
+        Args:
+            mesh: 3D mesh object
+            theta: Elevation angle(s) in degrees
+            phi: Azimuth angle(s) in degrees
+            polarization: 'VV', 'HH', 'VH', or 'HV'
+            
+        Returns:
+            RCS value(s) in m²
+        """
+        # Convert angles
+        theta = np.atleast_1d(np.asarray(theta))
+        phi = np.atleast_1d(np.asarray(phi))
+        theta_rad = np.deg2rad(theta.flatten())
+        phi_rad = np.deg2rad(phi.flatten())
+        
+        # Incident direction (monostatic case)
+        ki_hat = -np.column_stack([
+            np.sin(theta_rad) * np.cos(phi_rad),
+            np.sin(theta_rad) * np.sin(phi_rad),
+            np.cos(theta_rad)
+        ])
+        
+        rcs_values = []
+        
+        for i in range(len(theta_rad)):
+            ki = ki_hat[i]
+            
+            # Find specular points (where surface normal = -ki for monostatic)
+            # These are the stationary phase points
+            face_normals = mesh.face_normals
+            face_centers = mesh.vertices[mesh.faces].mean(axis=1)
+            
+            # Dot product to find alignment with incident direction
+            alignment = np.dot(face_normals, -ki)
+            
+            # Select faces that are nearly specular (within tolerance)
+            # and illuminated (facing the radar)
+            tolerance = 0.1  # Cosine tolerance for specular condition
+            specular_mask = (alignment > (1 - tolerance)) & (alignment > 0)
+            
+            if not np.any(specular_mask):
+                # No specular points - use closest faces
+                n_closest = min(10, len(face_normals))
+                closest_indices = np.argsort(alignment)[-n_closest:]
+                specular_mask = np.zeros_like(alignment, dtype=bool)
+                specular_mask[closest_indices] = alignment[closest_indices] > 0
+            
+            # Calculate RCS contribution from specular points
+            if np.any(specular_mask):
+                # Get specular faces
+                spec_normals = face_normals[specular_mask]
+                spec_centers = face_centers[specular_mask]
+                spec_areas = mesh.area_faces[specular_mask]
+                
+                # For each specular face, calculate the stationary phase contribution
+                # Using the asymptotic expansion of the PO integral
+                total_rcs = 0.0
+                
+                for j in range(len(spec_normals)):
+                    n = spec_normals[j]
+                    area = spec_areas[j]
+                    center = spec_centers[j]
+                    
+                    # Reflection coefficient (assuming PEC)
+                    # For monostatic case, the phase gradient vanishes at specular point
+                    cos_theta_i = np.dot(n, -ki)
+                    
+                    if cos_theta_i > 0:
+                        # Gaussian curvature approximation
+                        # For flat facets, we approximate local curvature
+                        # This is a simplified version - full implementation would
+                        # compute actual surface curvature
+                        
+                        # Effective area considering projection
+                        effective_area = area * cos_theta_i
+                        
+                        # Stationary phase contribution
+                        # For flat facets, this reduces to geometric optics
+                        rcs_contribution = 4 * np.pi * (effective_area**2) / (self.wavelength**2)
+                        
+                        # Add phase if there are multiple specular points
+                        if len(spec_normals) > 1:
+                            phase = 2 * self.k * np.dot(center, ki)
+                            rcs_contribution *= np.abs(np.exp(1j * phase))**2
+                        
+                        total_rcs += rcs_contribution
+                
+                rcs_values.append(total_rcs)
+            else:
+                # No illuminated faces
+                rcs_values.append(1e-10)
+        
+        # Reshape to match input
+        rcs_values = np.array(rcs_values)
+        if theta.ndim > 1:
+            rcs_values = rcs_values.reshape(theta.shape)
+            
+        return rcs_values

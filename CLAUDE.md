@@ -81,6 +81,12 @@ flake8 src/ examples/ tests/
 - Batch speedup: 474x for multiple angles
 - Memory: <2GB GPU RAM for 10k face meshes
 
+### Mesh Quality Features
+- Automatic mesh quality warnings for electrically large objects
+- Mesh refinement: `geometry.refine_mesh()` or `remesh_to_target_edge_length()`
+- Stationary phase approximation for very large objects: `calculate_rcs_stationary_phase()`
+- Recommended: 10 edges per wavelength for accurate results
+
 ## Important Patterns
 
 ### Mesh Deformation

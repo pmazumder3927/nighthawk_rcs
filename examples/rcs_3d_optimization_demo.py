@@ -62,12 +62,12 @@ def main():
     fig_sphere = visualizer.plot_geometry_3d(sphere_geometry, 
                                            show_normals=False, 
                                            title="Sphere Geometry")
-    fig_sphere.write_html('visualizations/sphere_geometry.html')
+    fig_sphere.write_html('../visualizations/sphere_geometry.html')
     
     fig_f117 = visualizer.plot_geometry_3d(f117_geometry, 
                                          show_normals=True,
                                          title="F-117 Inspired Geometry")
-    fig_f117.write_html('visualizations/f117_geometry.html')
+    fig_f117.write_html('../visualizations/f117_geometry.html')
     
     # 4. Calculate baseline RCS
     print("\n4. Calculating baseline RCS values...")
@@ -150,11 +150,11 @@ def main():
     
     fig_anim = visualizer.create_surface_evolution_animation(
         optimizer.history,
-        save_path='visualizations/surface_evolution.html',
+        save_path='../visualizations/surface_evolution.html',
         skip_frames=2  # Show every 2nd frame
     )
     
-    print("   Animation saved to: visualizations/surface_evolution.html")
+    print("   Animation saved to: ../visualizations/surface_evolution.html")
     
     # 8. Compare with F-117
     print("\n8. Creating comparison visualization...")
@@ -164,7 +164,7 @@ def main():
         optimized_sphere,
         rcs_calc
     )
-    fig_comparison.write_html('visualizations/optimization_comparison.html')
+    fig_comparison.write_html('../visualizations/optimization_comparison.html')
     
     # 9. Plot RCS patterns
     print("\n9. Calculating full RCS patterns (this will take time)...")
@@ -182,7 +182,7 @@ def main():
     # Plot RCS sphere
     fig_rcs = visualizer.plot_rcs_sphere(theta_grid, phi_grid, rcs_opt_db,
                                        title="Optimized Geometry RCS Pattern")
-    fig_rcs.write_html('visualizations/rcs_pattern_3d.html')
+    fig_rcs.write_html('../visualizations/rcs_pattern_3d.html')
     
     # 10. Plot RCS cuts
     print("\n10. Creating RCS cut plots...")
@@ -194,7 +194,7 @@ def main():
         cut_type='azimuth',
         fixed_angle=90.0
     )
-    plt.savefig('visualizations/rcs_azimuth_cut.png', dpi=150, bbox_inches='tight')
+    plt.savefig('../visualizations/rcs_azimuth_cut.png', dpi=150, bbox_inches='tight')
     
     # Elevation cut at φ=0°
     fig_elevation = visualizer.plot_rcs_cuts(
@@ -203,7 +203,7 @@ def main():
         cut_type='elevation',
         fixed_angle=0.0
     )
-    plt.savefig('visualizations/rcs_elevation_cut.png', dpi=150, bbox_inches='tight')
+    plt.savefig('../visualizations/rcs_elevation_cut.png', dpi=150, bbox_inches='tight')
     
     # Summary
     print("\n" + "=" * 70)
@@ -226,7 +226,7 @@ def main():
     print("4. GPU acceleration enables accurate Physical Optics calculations")
     print("5. F-117's faceted design is validated by physics-based optimization")
     
-    print("\nVisualization files created in 'visualizations/' directory:")
+    print("\nVisualization files created in '../visualizations/' directory:")
     print("- sphere_geometry.html: Initial sphere geometry")
     print("- f117_geometry.html: F-117 inspired geometry")
     print("- surface_evolution.html: Animated optimization progress")
@@ -235,16 +235,14 @@ def main():
     print("- rcs_azimuth_cut.png: Azimuth RCS pattern")
     print("- rcs_elevation_cut.png: Elevation RCS pattern")
     
-    # Optional: Save optimized geometry
-    optimized_sphere.export('visualizations/optimized_sphere.stl')
-    print("\nOptimized geometry saved as: optimized_sphere.stl")
+    # (Removed STL export to reduce file clutter)
     
     print("\n✅ 3D RCS optimization demonstration complete!")
 
 
 if __name__ == "__main__":
     # Create output directory if it doesn't exist
-    os.makedirs('visualizations', exist_ok=True)
+    os.makedirs('../visualizations', exist_ok=True)
     
     # Run the demo
     main() 
