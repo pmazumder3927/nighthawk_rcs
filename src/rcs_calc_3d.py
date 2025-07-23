@@ -44,7 +44,6 @@ class RCS3DCalculator:
         self._cached_mesh_hash = None
         self._mesh_data = None
         self._rcs_func = None
-        self._rcs_batch_func = None
     
     def _prepare_mesh_data(self, mesh: trimesh.Trimesh) -> dict:
         """
@@ -87,24 +86,18 @@ class RCS3DCalculator:
     
     def _compile_functions(self):
         """Compile JAX functions for RCS calculation."""
-        # Single angle calculation
-        self._rcs_func = jit(
-            partial(self._calculate_rcs_jax, 
-                   self._mesh_data['centers'],
-                   self._mesh_data['normals'], 
-                   self._mesh_data['areas']),
-            static_argnames=('k', 'eta')
-        )
+        # Batch calculation - handles both single and multiple angles
+        def batch_wrapper(ki_hat_batch, ks_hat_batch, Ei_hat_batch, Es_hat_batch, k, eta):
+            return vmap(
+                lambda ki, ks, Ei, Es: self._calculate_rcs_jax(
+                    self._mesh_data['centers'],
+                    self._mesh_data['normals'],
+                    self._mesh_data['areas'],
+                    ki, ks, Ei, Es, k, eta
+                )
+            )(ki_hat_batch, ks_hat_batch, Ei_hat_batch, Es_hat_batch)
         
-        # Batch calculation
-        self._rcs_batch_func = jit(
-            vmap(partial(self._calculate_rcs_jax,
-                        self._mesh_data['centers'],
-                        self._mesh_data['normals'],
-                        self._mesh_data['areas']),
-                 in_axes=(0, 0, 0, 0, None, None)),
-            static_argnames=('k', 'eta')
-        )
+        self._rcs_func = jit(batch_wrapper, static_argnames=('k', 'eta'))
     
     @staticmethod
     def _calculate_rcs_jax(face_centers, face_normals, face_areas,
@@ -148,51 +141,73 @@ class RCS3DCalculator:
         return rcs
     
     def calculate_rcs(self, mesh: trimesh.Trimesh, 
-                     theta: float, phi: float,
-                     polarization: str = 'VV') -> float:
+                     theta, phi,
+                     polarization: str = 'VV'):
         """
-        Calculate monostatic RCS for a single angle.
+        Calculate monostatic RCS for single or multiple angles.
         
         Args:
             mesh: 3D mesh object
-            theta: Elevation angle in degrees (0° = z-axis)
-            phi: Azimuth angle in degrees (0° = x-axis)
+            theta: Elevation angle(s) in degrees (0° = z-axis)
+                   Can be a scalar or array
+            phi: Azimuth angle(s) in degrees (0° = x-axis)
+                 Can be a scalar or array  
             polarization: 'VV', 'HH', 'VH', or 'HV'
             
         Returns:
-            RCS in square meters
+            RCS in square meters (scalar if single angle, array if multiple)
         """
         # Prepare mesh data
         self._prepare_mesh_data(mesh)
+        
+        # Convert to arrays to handle both scalar and array inputs
+        theta = np.atleast_1d(np.asarray(theta))
+        phi = np.atleast_1d(np.asarray(phi))
+        
+        if theta.shape != phi.shape:
+            raise ValueError("theta and phi must have the same shape")
+        
+        # Store if input was scalar
+        was_scalar = theta.ndim == 0 or (theta.ndim == 1 and len(theta) == 1)
         
         # Convert angles to radians
         theta_rad = np.deg2rad(theta)
         phi_rad = np.deg2rad(phi)
         
-        # Incident wave propagation direction
-        # For theta=0, wave propagates downward (-z)
-        ki_hat = -np.array([
+        # Calculate all directions
+        ki_hat = -np.column_stack([
             np.sin(theta_rad) * np.cos(phi_rad),
             np.sin(theta_rad) * np.sin(phi_rad),
             np.cos(theta_rad)
-        ])
-        
-        # Scattered direction (monostatic: opposite to incident)
+        ]).reshape(-1, 3)
         ks_hat = -ki_hat
         
-        # Define polarization vectors
-        if theta_rad < 1e-6:  # Handle singularity at theta=0
-            theta_hat = np.array([1, 0, 0])
-            phi_hat = np.array([0, 1, 0])
-        else:
-            theta_hat = np.array([
-                np.cos(theta_rad) * np.cos(phi_rad),
-                np.cos(theta_rad) * np.sin(phi_rad),
-                -np.sin(theta_rad)
-            ])
-            phi_hat = np.array([-np.sin(phi_rad), np.cos(phi_rad), 0])
+        # Polarization vectors
+        mask_zero = theta_rad.flatten() < 1e-6
+        n_angles = len(theta_rad.flatten())
         
-        # Set incident and scattered polarizations
+        theta_hat = np.zeros((n_angles, 3))
+        phi_hat = np.zeros((n_angles, 3))
+        
+        # At theta=0
+        theta_hat[mask_zero] = [1, 0, 0]
+        phi_hat[mask_zero] = [0, 1, 0]
+        
+        # Away from theta=0
+        theta_flat = theta_rad.flatten()
+        phi_flat = phi_rad.flatten()
+        theta_hat[~mask_zero] = np.column_stack([
+            np.cos(theta_flat[~mask_zero]) * np.cos(phi_flat[~mask_zero]),
+            np.cos(theta_flat[~mask_zero]) * np.sin(phi_flat[~mask_zero]),
+            -np.sin(theta_flat[~mask_zero])
+        ])
+        phi_hat[~mask_zero] = np.column_stack([
+            -np.sin(phi_flat[~mask_zero]),
+            np.cos(phi_flat[~mask_zero]),
+            np.zeros(np.sum(~mask_zero))
+        ])
+        
+        # Set polarizations
         Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
         Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
         
@@ -202,9 +217,15 @@ class RCS3DCalculator:
         Ei_hat_jax = jnp.asarray(Ei_hat)
         Es_hat_jax = jnp.asarray(Es_hat)
         
-        rcs = self._rcs_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
+        # Use batch function
+        rcs_values = self._rcs_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
+        rcs_values = np.array(rcs_values)
         
-        return float(rcs)
+        # Return scalar if input was scalar
+        if was_scalar:
+            return float(rcs_values[0])
+        else:
+            return rcs_values.reshape(theta.shape)
     
     def calculate_rcs_pattern(self, mesh: trimesh.Trimesh,
                             theta_range: Tuple[float, float] = (0, 180),
@@ -212,7 +233,7 @@ class RCS3DCalculator:
                             n_theta: int = 37, n_phi: int = 73,
                             polarization: str = 'VV') -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Calculate full 3D RCS pattern using batch processing.
+        Calculate full 3D RCS pattern.
         
         Args:
             mesh: 3D mesh object
@@ -225,76 +246,23 @@ class RCS3DCalculator:
         Returns:
             theta_grid, phi_grid, rcs_db: 2D arrays for plotting
         """
-        # Prepare mesh data
-        self._prepare_mesh_data(mesh)
-        
         # Create angle grids
         theta = np.linspace(theta_range[0], theta_range[1], n_theta)
         phi = np.linspace(phi_range[0], phi_range[1], n_phi)
         theta_grid, phi_grid = np.meshgrid(theta, phi, indexing='ij')
         
-        # Flatten for batch processing
-        theta_flat = theta_grid.flatten()
-        phi_flat = phi_grid.flatten()
+        # Calculate RCS using unified function
+        print(f"Calculating RCS pattern ({theta_grid.size} angles)...")
+        rcs_grid = self.calculate_rcs(mesh, theta_grid, phi_grid, polarization)
         
-        # Convert to radians
-        theta_rad = np.deg2rad(theta_flat)
-        phi_rad = np.deg2rad(phi_flat)
-        
-        # Calculate all directions
-        ki_hat = -np.column_stack([
-            np.sin(theta_rad) * np.cos(phi_rad),
-            np.sin(theta_rad) * np.sin(phi_rad),
-            np.cos(theta_rad)
-        ])
-        ks_hat = -ki_hat
-        
-        # Polarization vectors
-        # Handle singularity at theta=0
-        mask_zero = theta_rad < 1e-6
-        
-        theta_hat = np.zeros_like(ki_hat)
-        phi_hat = np.zeros_like(ki_hat)
-        
-        # At theta=0
-        theta_hat[mask_zero] = [1, 0, 0]
-        phi_hat[mask_zero] = [0, 1, 0]
-        
-        # Away from theta=0
-        theta_hat[~mask_zero] = np.column_stack([
-            np.cos(theta_rad[~mask_zero]) * np.cos(phi_rad[~mask_zero]),
-            np.cos(theta_rad[~mask_zero]) * np.sin(phi_rad[~mask_zero]),
-            -np.sin(theta_rad[~mask_zero])
-        ])
-        phi_hat[~mask_zero] = np.column_stack([
-            -np.sin(phi_rad[~mask_zero]),
-            np.cos(phi_rad[~mask_zero]),
-            np.zeros(np.sum(~mask_zero))
-        ])
-        
-        # Set polarizations
-        Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
-        Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
-        
-        # Convert to JAX arrays
-        ki_hat_jax = jnp.asarray(ki_hat)
-        ks_hat_jax = jnp.asarray(ks_hat)
-        Ei_hat_jax = jnp.asarray(Ei_hat)
-        Es_hat_jax = jnp.asarray(Es_hat)
-        
-        # Batch calculation
-        print(f"Calculating RCS pattern ({len(theta_flat)} angles)...")
-        rcs_flat = self._rcs_batch_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
-        
-        # Reshape and convert to dB
-        rcs_grid = np.array(rcs_flat).reshape(theta_grid.shape)
+        # Convert to dB
         rcs_db = 10 * np.log10(rcs_grid + 1e-10)
         
         return theta_grid, phi_grid, rcs_db
+    
     
     def clear_cache(self):
         """Clear cached mesh data and compiled functions."""
         self._cached_mesh_hash = None
         self._mesh_data = None
         self._rcs_func = None
-        self._rcs_batch_func = None

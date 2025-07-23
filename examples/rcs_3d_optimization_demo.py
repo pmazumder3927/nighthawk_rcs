@@ -35,7 +35,7 @@ def main():
     # 1. Setup
     print("\n1. Setting up RCS calculator with GPU support...")
     # X-band radar (10 GHz)
-    rcs_calc = RCS3DCalculator(frequency=10e9, use_gpu=True)
+    rcs_calc = RCS3DCalculator(frequency=10e9)
     print(f"   Frequency: {rcs_calc.frequency/1e9:.1f} GHz")
     print(f"   Wavelength: {rcs_calc.wavelength:.3f} m")
     
@@ -110,13 +110,13 @@ def main():
     )
     
     # Run optimization
-    # print("\n   Running gradient-based optimization (Adam)...")
+    print("\n   Running differential evolution optimization...")
     print("   This may take several minutes with GPU acceleration...")
     start_time = time.time()
-    optimized_sphere = optimizer.jax_differential_evolution_3d(
+    optimized_sphere = optimizer.differential_evolution_3d(
         sphere_geometry,
-        n_generations=400,
-        population_size=100,
+        n_generations=50,  # Reduced for demo
+        population_size=20,  # Reduced for demo
         target_angles=target_angles,
     )
 

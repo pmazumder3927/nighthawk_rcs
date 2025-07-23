@@ -1,43 +1,29 @@
 """
-3D topology optimization for RCS reduction with GPU acceleration.
+3D topology optimization for RCS reduction with JAX acceleration.
 
-This module implements advanced optimization algorithms for 3D geometries:
-- Gradient-based optimization with adjoint sensitivity
-- GPU-accelerated objective evaluation
-- Smooth deformation fields
-- Multiple optimization strategies
+This module implements optimization algorithms for 3D geometries:
+- Gradient-based optimization with various update rules
+- Differential evolution with JAX acceleration
+- NLopt integration for derivative-free methods
 """
 
 import numpy as np
-from typing import Optional, Dict, List, Callable, Tuple
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap
+from typing import List, Tuple, Optional
 from tqdm import tqdm
 import copy
 import time
-from scipy.optimize import minimize, differential_evolution
 import nlopt
 
-try:
-    from .geometry_3d import Geometry3D
-    from .rcs_calc_3d import RCS3DCalculator
-except ImportError:
-    # Fallback for direct execution
-    from geometry_3d import Geometry3D
-    from rcs_calc_3d import RCS3DCalculator
-
-try:
-    import jax
-    import jax.numpy as jnp
-    from jax import jit
-    GPU_AVAILABLE = len(jax.devices('gpu')) > 0
-except ImportError:
-    jax = None
-    jnp = np  # Fallback to NumPy
-    GPU_AVAILABLE = False
+from .geometry_3d import Geometry3D
+from .rcs_calc_3d import RCS3DCalculator
 
 
 class TopologyOptimizer3D:
     """
-    3D topology optimizer for RCS reduction with GPU support.
+    3D topology optimizer for RCS reduction using JAX acceleration.
     """
     
     def __init__(self, rcs_calculator: RCS3DCalculator,
@@ -95,20 +81,18 @@ class TopologyOptimizer3D:
         else:
             weights = weights / np.sum(weights)
             
-        # Calculate RCS at each angle
-        # Use batch processing for efficiency (GPU-accelerated when available)
-        theta_angles = np.array([tp[0] for tp in target_angles])
-        phi_angles = np.array([tp[1] for tp in target_angles])
-
-        # Delegates to GPU-accelerated batch routine when possible; gracefully
-        # falls back to CPU inside the calculator implementation.
-        rcs_values = self.rcs_calc.calculate_rcs_batch(
+        # Calculate RCS at all angles
+        theta_angles = np.array([angle[0] for angle in target_angles])
+        phi_angles = np.array([angle[1] for angle in target_angles])
+        
+        # Use unified calculation function
+        rcs_values = self.rcs_calc.calculate_rcs(
             geometry.mesh,
             theta_angles,
-            phi_angles,
+            phi_angles
         )
         
-        # Weighted mean in linear scale (not dB)
+        # Weighted mean in linear scale
         objective = np.sum(weights * rcs_values)
         
         # Add volume penalty if enabled
@@ -142,10 +126,9 @@ class TopologyOptimizer3D:
         
         # Setup control points if not provided
         if self.control_points is None:
-            # Use subset of vertices as control points
             n_vertices = len(geometry.mesh.vertices)
             n_control = min(100, max(4, n_vertices // 10))
-            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            n_control = min(n_control, n_vertices)
             indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = geometry.mesh.vertices[indices]
             
@@ -170,8 +153,8 @@ class TopologyOptimizer3D:
         
         with tqdm(total=n_iterations, desc="3D Optimization") as pbar:
             for iteration in range(n_iterations):
-                # Calculate gradient
-                gradient = self._calculate_gradient_3d(geometry, target_angles)
+                # Calculate gradient using finite differences
+                gradient = self._calculate_gradient(geometry, target_angles)
                 gradient_flat = gradient.flatten()
                 
                 # Apply optimizer update
@@ -229,9 +212,9 @@ class TopologyOptimizer3D:
         
         return geometry
         
-    def _calculate_gradient_3d(self, geometry: Geometry3D,
-                              target_angles: Optional[List[Tuple[float, float]]],
-                              epsilon: float = 0.01) -> np.ndarray:
+    def _calculate_gradient(self, geometry: Geometry3D,
+                           target_angles: Optional[List[Tuple[float, float]]],
+                           epsilon: float = 0.01) -> np.ndarray:
         """
         Calculate gradient using finite differences.
         
@@ -242,89 +225,19 @@ class TopologyOptimizer3D:
         gradient = np.zeros((n_control, 3))
         base_obj = self.objective_function(geometry, target_angles)
         
-        # Use JAX automatic differentiation if available and GPU is enabled
-        # JAX autodiff disabled for now due to geometry operation complexity
-        # if jax is not None and self.rcs_calc.use_gpu:
-        #     return self._calculate_gradient_jax(geometry, target_angles, epsilon)
-        
-        # Parallel gradient calculation if GPU available
-        if GPU_AVAILABLE and self.rcs_calc.use_gpu:
-            # Batch process perturbations
-            for i in range(n_control):
-                for j in range(3):
-                    # Positive perturbation
-                    disp = np.zeros((n_control, 3))
-                    disp[i, j] = epsilon
-                    
-                    perturbed_geom = geometry.apply_deformation(
-                        self.control_points, disp, self.smoothness)
-                    perturbed_obj = self.objective_function(perturbed_geom, target_angles)
-                    
-                    # Finite difference
-                    gradient[i, j] = (perturbed_obj - base_obj) / epsilon
-        else:
-            # Sequential calculation
-            for i in range(n_control):
-                for j in range(3):
-                    disp = np.zeros((n_control, 3))
-                    disp[i, j] = epsilon
-                    
-                    perturbed_geom = geometry.apply_deformation(
-                        self.control_points, disp, self.smoothness)
-                    perturbed_obj = self.objective_function(perturbed_geom, target_angles)
-                    
-                    gradient[i, j] = (perturbed_obj - base_obj) / epsilon
-                    
-        return gradient
-        
-    def _calculate_gradient_jax(self, geometry: Geometry3D,
-                               target_angles: Optional[List[Tuple[float, float]]],
-                               epsilon: float = 0.01) -> np.ndarray:
-        """
-        Calculate gradient using JAX automatic differentiation (when available).
-        
-        Returns:
-            Gradient array of shape (n_control_points, 3)
-        """
-        if jax is None:
-            # Fallback to finite differences
-            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
-            
-        try:
-            # For now, JAX autodiff is complex due to geometry operations
-            # Fall back to optimized finite differences
-            print("JAX autodiff not yet fully implemented for geometry operations")
-            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
-            
-        except Exception as e:
-            print(f"JAX gradient calculation failed: {e}")
-            print("Falling back to finite differences")
-            # Fallback to finite differences
-            return self._calculate_gradient_finite_diff(geometry, target_angles, epsilon)
-    
-    def _calculate_gradient_finite_diff(self, geometry: Geometry3D,
-                                       target_angles: Optional[List[Tuple[float, float]]],
-                                       epsilon: float = 0.01) -> np.ndarray:
-        """
-        Calculate gradient using finite differences (fallback method).
-        
-        Returns:
-            Gradient array of shape (n_control_points, 3)
-        """
-        n_control = len(self.control_points)
-        gradient = np.zeros((n_control, 3))
-        base_obj = self.objective_function(geometry, target_angles)
-        
-        # Sequential calculation
+        # Calculate gradient using finite differences
         for i in range(n_control):
             for j in range(3):
+                # Create perturbation
                 disp = np.zeros((n_control, 3))
                 disp[i, j] = epsilon
                 
+                # Apply perturbation
                 perturbed_geom = geometry.apply_deformation(
                     self.control_points, disp, self.smoothness)
                 perturbed_obj = self.objective_function(perturbed_geom, target_angles)
                 
+                # Finite difference
                 gradient[i, j] = (perturbed_obj - base_obj) / epsilon
                 
         return gradient
@@ -348,7 +261,7 @@ class TopologyOptimizer3D:
             'rcs_values': [],
             'objective_values': [initial_objective],
             'iterations': 0,
-            'volume_ratios': [initial_geometry.volume / self.initial_volume]
+            'volume_ratios': [1.0]
         }
         
         # Convert initial objective to RCS in dB for display
@@ -369,80 +282,14 @@ class TopologyOptimizer3D:
         mean_rcs_db = 10 * np.log10(objective + 1e-10)
         self.history['rcs_values'].append(mean_rcs_db)
         
-    def _batch_objective_evaluation(self, geometries: List[Geometry3D], 
-                                   target_angles: Optional[List[Tuple[float, float]]]) -> np.ndarray:
+    def differential_evolution_3d(self, initial_geometry: Geometry3D,
+                                 n_generations: int = 50,
+                                 population_size: int = 15,
+                                 target_angles: Optional[List[Tuple[float, float]]] = None,
+                                 F: float = 0.8,
+                                 CR: float = 0.9) -> Geometry3D:
         """
-        Evaluate objective function for multiple geometries simultaneously using GPU batching.
-        
-        Args:
-            geometries: List of geometries to evaluate
-            target_angles: Target angles for RCS calculation
-            
-        Returns:
-            Array of objective values
-        """
-        if target_angles is None:
-            # Default: sample uniformly on hemisphere
-            theta = np.linspace(30, 150, 7)  # Avoid grazing angles
-            phi = np.linspace(0, 360, 13, endpoint=False)
-            target_angles = [(t, p) for t in theta for p in phi]
-            
-        n_geometries = len(geometries)
-        n_angles = len(target_angles)
-        
-        # Prepare batch data
-        theta_angles = np.array([tp[0] for tp in target_angles])
-        phi_angles = np.array([tp[1] for tp in target_angles])
-        
-        # Create batch arrays: [n_geometries, n_angles]
-        theta_batch = np.tile(theta_angles, (n_geometries, 1))
-        phi_batch = np.tile(phi_angles, (n_geometries, 1))
-        
-        # Flatten for batch processing
-        theta_flat = theta_batch.flatten()
-        phi_flat = phi_batch.flatten()
-        
-        # Calculate RCS for all geometry-angle combinations
-        all_rcs = []
-        for i, geometry in enumerate(geometries):
-            start_idx = i * n_angles
-            end_idx = (i + 1) * n_angles
-            
-            # Extract RCS values for this geometry
-            rcs_values = self.rcs_calc.calculate_rcs_batch(
-                geometry.mesh,
-                theta_flat[start_idx:end_idx],
-                phi_flat[start_idx:end_idx]
-            )
-            all_rcs.append(rcs_values)
-        
-        # Convert to objectives
-        objectives = np.zeros(n_geometries)
-        weights = np.ones(n_angles) / n_angles  # Uniform weights
-        
-        for i, rcs_values in enumerate(all_rcs):
-            # Weighted mean in linear scale
-            objective = np.sum(weights * rcs_values)
-            
-            # Add volume penalty if enabled
-            if self.volume_constraint and hasattr(self, 'initial_volume'):
-                volume_ratio = geometries[i].volume / self.initial_volume
-                volume_penalty = 100 * (volume_ratio - 1.0)**2
-                objective += volume_penalty
-                
-            objectives[i] = objective
-            
-        return objectives
-        
-    def jax_differential_evolution_3d(self, initial_geometry: Geometry3D,
-                                    n_generations: int = 50,
-                                    population_size: int = 15,
-                                    target_angles: Optional[List[Tuple[float, float]]] = None,
-                                    F: float = 0.8,
-                                    CR: float = 0.9,
-                                    control_points: Optional[np.ndarray] = None) -> Geometry3D:
-        """
-        JAX-based differential evolution for GPU acceleration.
+        JAX-accelerated differential evolution optimization.
         
         Args:
             initial_geometry: Starting geometry
@@ -455,11 +302,6 @@ class TopologyOptimizer3D:
         Returns:
             Optimized geometry
         """
-        self.control_points = control_points
-        if not self.rcs_calc.use_gpu or jax is None:
-            print("JAX not available or GPU not enabled. Falling back to scipy DE.")
-            return self.differential_evolution_3d(initial_geometry, n_generations, population_size, target_angles)
-            
         self.initial_volume = initial_geometry.volume
         
         # Setup control points
@@ -476,6 +318,7 @@ class TopologyOptimizer3D:
         self.base_geometry = initial_geometry
         self.target_angles = target_angles
         
+        # JIT compile DE step
         @jit
         def de_step(population, F, CR, key):
             """Single DE step compiled with JAX."""
@@ -485,7 +328,7 @@ class TopologyOptimizer3D:
             keys = jax.random.split(key, pop_size)
             
             def mutate_individual(i, individual_key):
-                # Select three random individuals (different from current)
+                # Select three random individuals
                 indices = jax.random.choice(individual_key, pop_size, (3,), replace=False)
                 indices = jnp.where(indices == i, (indices + 1) % pop_size, indices)
                 
@@ -493,10 +336,10 @@ class TopologyOptimizer3D:
                 mutant = population[indices[0]] + F * (population[indices[1]] - population[indices[2]])
                 
                 # Crossover
-                cross_key = jax.random.split(individual_key, n_dims)
+                cross_key = jax.random.split(individual_key, 2)
                 cross_mask = jax.random.uniform(cross_key[0], (n_dims,)) < CR
                 
-                # Ensure at least one dimension is crossed over
+                # Ensure at least one dimension is crossed
                 j_rand = jax.random.randint(cross_key[1], (), 0, n_dims)
                 cross_mask = cross_mask.at[j_rand].set(True)
                 
@@ -508,7 +351,7 @@ class TopologyOptimizer3D:
                 return trial
                 
             # Vectorized mutation and crossover
-            trials = jax.vmap(mutate_individual)(jnp.arange(pop_size), keys)
+            trials = vmap(mutate_individual)(jnp.arange(pop_size), keys)
             
             return trials
             
@@ -521,14 +364,14 @@ class TopologyOptimizer3D:
             maxval=self.max_displacement
         )
         
-        # Convert to numpy for objective evaluation (since geometry operations aren't in JAX)
+        # Convert to numpy for objective evaluation
         population = np.array(population)
         
         # Evaluate initial population
-        objectives = self._batch_objective_evaluation(
-            [self._create_geometry_from_params(p) for p in population],
-            target_angles
-        )
+        objectives = np.array([
+            self.objective_function(self._create_geometry_from_params(p), target_angles)
+            for p in population
+        ])
         
         best_idx = np.argmin(objectives)
         best_params = population[best_idx].copy()
@@ -539,14 +382,13 @@ class TopologyOptimizer3D:
         self._initialize_history(initial_geometry, best_objective)
         
         print("="*60)
-        print("JAX DIFFERENTIAL EVOLUTION OPTIMIZATION")
+        print("DIFFERENTIAL EVOLUTION OPTIMIZATION")
         print("="*60)
         print(f"Population size: {population_size}")
         print(f"Max generations: {n_generations}")
         print(f"Control points: {len(self.control_points)}")
         print(f"Parameters: {n_params}")
-        print(f"F (differential weight): {F}")
-        print(f"CR (crossover rate): {CR}")
+        print(f"F: {F}, CR: {CR}")
         print(f"Initial best objective: {best_objective:.6f}")
         print("-"*60)
         
@@ -559,10 +401,10 @@ class TopologyOptimizer3D:
             trials = np.array(trials)
             
             # Evaluate trial population
-            trial_objectives = self._batch_objective_evaluation(
-                [self._create_geometry_from_params(p) for p in trials],
-                target_angles
-            )
+            trial_objectives = np.array([
+                self.objective_function(self._create_geometry_from_params(p), target_angles)
+                for p in trials
+            ])
             
             # Selection
             improved = trial_objectives < objectives
@@ -575,28 +417,21 @@ class TopologyOptimizer3D:
                 best_objective = objectives[current_best_idx]
                 best_params = population[current_best_idx].copy()
                 
-            # Store history for visualization (every 5th generation to avoid excessive memory)
-            if generation % 1 == 0 or generation == n_generations - 1:
-                best_geometry = self._create_geometry_from_params(best_params)
-                self._update_history(best_geometry, best_objective, generation + 1)
-            else:
-                # Update iteration count without storing geometry
-                self.history['iterations'] = generation + 1
+            # Store history every generation
+            best_geometry = self._create_geometry_from_params(best_params)
+            self._update_history(best_geometry, best_objective, generation + 1)
                 
-            # Progress update
+            # Progress update every generation
             elapsed = time.time() - start_time
             print(f"Generation {generation+1:3d}/{n_generations}: "
                   f"Best = {best_objective:.6f}, "
                   f"Mean = {np.mean(objectives):.6f}, "
-                  f"Std = {np.std(objectives):.6f}, "
-                  f"Elapsed = {elapsed:.1f}s")
-                  
+                  f"Time = {elapsed:.1f}s")
+                      
         total_time = time.time() - start_time
         print("-"*60)
-        print(f"JAX DE OPTIMIZATION COMPLETE")
-        print(f"Total time: {total_time:.1f}s")
+        print(f"Optimization complete in {total_time:.1f}s")
         print(f"Final best objective: {best_objective:.6f}")
-        print("="*60)
         
         # Create final geometry
         final_geometry = self._create_geometry_from_params(best_params)
@@ -622,8 +457,8 @@ class TopologyOptimizer3D:
         
         Args:
             initial_geometry: Starting geometry  
-            algorithm: NLopt algorithm name
-            n_iterations: Maximum iterations
+            algorithm: 'COBYLA', 'BOBYQA', or 'SBPLX'
+            n_iterations: Maximum evaluations
             target_angles: Target angles
             
         Returns:
@@ -635,22 +470,20 @@ class TopologyOptimizer3D:
         if self.control_points is None:
             n_vertices = len(initial_geometry.mesh.vertices)
             n_control = min(75, max(4, n_vertices // 15))
-            n_control = min(n_control, n_vertices)  # Ensure we don't exceed available vertices
+            n_control = min(n_control, n_vertices)
             indices = np.random.choice(n_vertices, n_control, replace=False)
             self.control_points = initial_geometry.mesh.vertices[indices].copy()
             
         n_params = self.control_points.shape[0] * 3
         
         # Create NLopt optimizer
-        if algorithm == 'COBYLA':
-            opt = nlopt.opt(nlopt.LN_COBYLA, n_params)
-        elif algorithm == 'BOBYQA':
-            opt = nlopt.opt(nlopt.LN_BOBYQA, n_params)
-        elif algorithm == 'SBPLX':
-            opt = nlopt.opt(nlopt.LN_SBPLX, n_params)
-        else:
-            opt = nlopt.opt(nlopt.LN_COBYLA, n_params)
-            
+        opt_map = {
+            'COBYLA': nlopt.LN_COBYLA,
+            'BOBYQA': nlopt.LN_BOBYQA,
+            'SBPLX': nlopt.LN_SBPLX
+        }
+        opt = nlopt.opt(opt_map.get(algorithm, nlopt.LN_COBYLA), n_params)
+        
         # Set bounds
         opt.set_lower_bounds(-self.max_displacement * np.ones(n_params))
         opt.set_upper_bounds(self.max_displacement * np.ones(n_params))
@@ -661,51 +494,39 @@ class TopologyOptimizer3D:
         self.eval_count = 0
         
         # Initialize history
-        initial_geometry_obj = self._create_geometry_from_params(np.zeros(n_params))
-        initial_objective = self.objective_function(initial_geometry_obj, target_angles)
-        self._initialize_history(initial_geometry_obj, initial_objective)
+        initial_objective = self.objective_function(initial_geometry, target_angles)
+        self._initialize_history(initial_geometry, initial_objective)
         
         def objective_nlopt(x, grad):
             """NLopt objective function."""
             self.eval_count += 1
             
-            displacements = x.reshape(-1, 3)
-            geometry = self.base_geometry.apply_deformation(
-                self.control_points,
-                displacements,
-                smoothing=self.smoothness
-            )
-            
+            # Create geometry from parameters
+            geometry = self._create_geometry_from_params(x)
             obj = self.objective_function(geometry, self.target_angles)
             
-            # Store history every 10 evaluations
+            # Store history periodically
             if self.eval_count % 10 == 0:
                 print(f"Eval {self.eval_count}: Obj = {obj:.6f}")
                 self._update_history(geometry, obj, self.eval_count)
                 
             return obj
             
-        # Set objective
+        # Set objective and run
         opt.set_min_objective(objective_nlopt)
         opt.set_maxeval(n_iterations)
         
-        # Initial guess
-        x0 = np.zeros(n_params)
-        
-        # Optimize
         print(f"Running NLopt {algorithm} optimization...")
-        x_opt = opt.optimize(x0)
+        x_opt = opt.optimize(np.zeros(n_params))
         
-        # Apply solution
-        final_displacements = x_opt.reshape(-1, 3)
-        final_geometry = self.base_geometry.apply_deformation(
-            self.control_points,
-            final_displacements,
-            smoothing=self.smoothness
-        )
+        # Create final geometry
+        final_geometry = self._create_geometry_from_params(x_opt)
         
-        # Store final solution in history
+        # Store final result
         final_objective = self.objective_function(final_geometry, self.target_angles)
         self._update_history(final_geometry, final_objective, self.eval_count)
         
-        return final_geometry 
+        print(f"Optimization complete after {self.eval_count} evaluations")
+        print(f"Final objective: {final_objective:.6f}")
+        
+        return final_geometry
