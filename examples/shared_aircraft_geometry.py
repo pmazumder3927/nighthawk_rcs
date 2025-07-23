@@ -21,7 +21,8 @@ def create_base_aircraft_geometry(nose_angle=15.0, wing_sweep=35.0, tail_angle=2
         tail_angle: Tail cone angle in degrees
         
     Returns:
-        Geometry3D object
+        tuple: (Geometry3D object, num_facets, component_info)
+            where component_info contains control point indices for each component
     """
     # Basic dimensions (10m aircraft)
     length = 10.0
@@ -80,9 +81,12 @@ def create_base_aircraft_geometry(nose_angle=15.0, wing_sweep=35.0, tail_angle=2
         [length, 0, 0],  # 17: Tail tip
     ])
     
-    # Vertical stabilizer
+    # Vertical stabilizer (add more vertices for proper deformation)
     vertices.extend([
         [length - tail_length/2, 0, height],  # 18: Vertical tail top
+        [length - tail_length*0.7, 0, height*0.8],  # 19: Vertical tail mid-front
+        [length - tail_length*0.3, 0, height*0.8],  # 20: Vertical tail mid-rear
+        [length - tail_length*0.5, 0, height*0.6],  # 21: Vertical tail lower
     ])
     
     # Define faces
@@ -110,7 +114,8 @@ def create_base_aircraft_geometry(nose_angle=15.0, wing_sweep=35.0, tail_angle=2
         [13, 17, 14], [14, 17, 16], [16, 17, 15], [15, 17, 13],
         
         # Vertical stabilizer
-        [13, 18, 15], [15, 18, 17], [17, 18, 13],
+        [13, 19, 21], [21, 19, 18], [18, 20, 21], [21, 20, 15],
+        [19, 13, 18], [18, 13, 17], [17, 20, 18], [20, 17, 15],
     ]
     
     # Convert quads to triangles
@@ -132,7 +137,31 @@ def create_base_aircraft_geometry(nose_angle=15.0, wing_sweep=35.0, tail_angle=2
     # Count facets for ECHO-1 style reporting
     num_facets = len(mesh.faces)
     
-    return Geometry3D(mesh), num_facets
+    # Define component control points
+    component_info = {
+        'nose': {
+            'vertex_indices': [0, 1, 2, 3, 4],  # Nose cone vertices
+            'description': 'Nose cone shape'
+        },
+        'wings': {
+            'vertex_indices': [9, 10, 11, 12],  # Wing vertices
+            'description': 'Wing geometry and sweep'
+        },
+        'fuselage': {
+            'vertex_indices': [5, 6, 7, 8],  # Mid-fuselage vertices
+            'description': 'Fuselage cross-section'
+        },
+        'tail': {
+            'vertex_indices': [13, 14, 15, 16, 17],  # Tail section
+            'description': 'Tail cone shape'
+        },
+        'vertical_stabilizer': {
+            'vertex_indices': [18, 19, 20, 21],  # Vertical stabilizer vertices
+            'description': 'Vertical tail'
+        }
+    }
+    
+    return Geometry3D(mesh), num_facets, component_info
 
 
 def get_optimization_parameters():

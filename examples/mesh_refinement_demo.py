@@ -12,9 +12,9 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.geometry_3d import Geometry3D, create_simple_shape_3d
+from src.geometry_3d import create_simple_shape_3d
 from src.rcs_calc_3d import RCS3DCalculator
-from src.visualization_3d import RCSVisualizer3D
+from src.visualization_manager import VisualizationManager
 
 
 def demonstrate_mesh_refinement():
@@ -24,6 +24,12 @@ def demonstrate_mesh_refinement():
     print("MESH REFINEMENT DEMONSTRATION")
     print("Showing how mesh resolution affects RCS accuracy")
     print("=" * 70)
+    
+    # Setup visualization manager
+    viz_manager = VisualizationManager(
+        output_dir='../visualizations',
+        project_name='mesh_refinement_demo'
+    )
     
     # Create a 1m diameter sphere (more reasonable for mesh demo)
     frequency = 10e9  # X-band
@@ -125,6 +131,7 @@ def demonstrate_mesh_refinement():
     print(f"  Std deviation: {np.std(rcs_refined_db):.1f} dB")
     print(f"  Error from theoretical: {np.mean(rcs_refined_db) - theoretical_db:.1f} dB")
     
+    
     # Create visualizations
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -206,8 +213,15 @@ Improvement:
     
     plt.suptitle('Mesh Refinement Impact on RCS Calculations', fontsize=16, weight='bold')
     plt.tight_layout()
-    plt.savefig('../visualizations/mesh_refinement_demo.png', dpi=150, bbox_inches='tight')
+    
+    # Save to visualization manager's output directory
+    comparison_plot_path = os.path.join(viz_manager.project_dir, 'mesh_refinement_comparison.png')
+    plt.savefig(comparison_plot_path, dpi=150, bbox_inches='tight')
     plt.close()
+    
+    # Add to manager's file list
+    from pathlib import Path
+    viz_manager.files_created.append(Path(comparison_plot_path))
     
     # (Removed STL export to reduce file clutter)
     
@@ -219,12 +233,27 @@ Improvement:
     print("3. Automatic refinement can fix mesh resolution issues")
     print("4. Always check mesh quality for electrically large objects!")
     
-    print("\nFiles generated:")
-    print("  - mesh_refinement_demo.png")
+    # Create final comparison visualization only
+    print("\n" + "="*70)
+    print("CREATING FINAL COMPARISON VISUALIZATION")
+    print("="*70)
     
-    return results, refined_sphere
+    viz_manager.create_optimization_comparison(
+        initial_geometry=results[0]['sphere'],  # Coarse mesh
+        optimized_geometry=refined_sphere,      # Auto-refined mesh
+        rcs_calculator=rcs_calc_refined,
+        target_angles=[(90, 0), (90, 90), (90, 180), (90, 270)],
+        optimization_history=None  # No optimization history for this demo
+    )
+    
+    # Create index file
+    index_file = viz_manager.create_index_html()
+    
+    # Print visualization summary
+    print(viz_manager.get_summary())
+    
+    return results, refined_sphere, viz_manager
 
 
 if __name__ == "__main__":
-    os.makedirs('../visualizations', exist_ok=True)
-    results, refined = demonstrate_mesh_refinement()
+    results, refined, viz_manager = demonstrate_mesh_refinement()

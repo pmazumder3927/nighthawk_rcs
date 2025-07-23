@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.rcs_calc_3d import RCS3DCalculator
 from src.visualization_3d import RCSVisualizer3D
+from src.visualization_manager import VisualizationManager
 from shared_aircraft_geometry import (
     create_base_aircraft_geometry, 
     get_optimization_parameters,
@@ -32,6 +33,12 @@ def echo1_style_optimization():
     print(" "*20 + "ECHO-1 MANUAL OPTIMIZATION")
     print(" "*15 + "Simulating 1970s Design Process")
     print("="*70)
+    
+    # Setup visualization manager
+    viz_manager = VisualizationManager(
+        output_dir='../visualizations',
+        project_name='echo1_manual_optimization'
+    )
     
     # Setup - 200 MHz like original ECHO-1
     frequency = 200e6
@@ -83,7 +90,7 @@ def echo1_style_optimization():
         print(f"Parameters: {parameters_to_string(params['nose'], params['sweep'], params['tail'])}")
         
         # Create aircraft
-        aircraft, num_facets = create_base_aircraft_geometry(
+        aircraft, num_facets, _ = create_base_aircraft_geometry(
             params['nose'], params['sweep'], params['tail']
         )
         
@@ -202,20 +209,33 @@ Final Design:
     
     plt.suptitle('ECHO-1 Style Manual Optimization Process', fontsize=16)
     plt.tight_layout()
-    plt.savefig('../visualizations/echo1_manual_process.png', dpi=150, bbox_inches='tight')
+    
+    # Save to visualization manager's output directory
+    process_plot_path = os.path.join(viz_manager.project_dir, 'echo1_manual_process.png')
+    plt.savefig(process_plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    # Create 3D visualization of evolution
-    visualizer = RCSVisualizer3D(backend='plotly')
+    # Add to manager's file list
+    from pathlib import Path
+    viz_manager.files_created.append(Path(process_plot_path))
     
-    # Show initial vs final
-    fig = visualizer.plot_optimization_comparison_3d(
-        results[0]['aircraft'],
-        results[-1]['aircraft'],
-        rcs_calc
+    # Create optimization comparison using visualization manager
+    print("\nCreating optimization comparison visualization...")
+    
+    # Build a simple optimization history for the manual process
+    manual_history = {
+        'geometries': [r['aircraft'] for r in results],
+        'objective_values': [10**(r['mean_rcs']/10) for r in results],  # Convert from dB to linear
+        'iterations': [r['iteration'] for r in results]
+    }
+    
+    viz_manager.create_optimization_comparison(
+        initial_geometry=results[0]['aircraft'],
+        optimized_geometry=results[-1]['aircraft'],
+        rcs_calculator=rcs_calc,
+        target_angles=threat_angles,
+        optimization_history=manual_history
     )
-    fig.update_layout(title="ECHO-1 Manual Optimization: Initial vs Final Design")
-    fig.write_html('../visualizations/echo1_manual_comparison.html')
     
     print("\n" + "="*70)
     print("MANUAL OPTIMIZATION COMPLETE")
@@ -231,13 +251,14 @@ Final Design:
     print("- Time/cost constraints limit iterations")
     print("- May miss non-intuitive optimal solutions")
     
-    print("\nFiles generated:")
-    print("  - echo1_manual_process.png")
-    print("  - echo1_manual_comparison.html")
+    # Create index file
+    index_file = viz_manager.create_index_html()
     
-    return results
+    # Print visualization summary
+    print(viz_manager.get_summary())
+    
+    return results, viz_manager
 
 
 if __name__ == "__main__":
-    os.makedirs('../visualizations', exist_ok=True)
-    results = echo1_style_optimization()
+    results, viz_manager = echo1_style_optimization()
