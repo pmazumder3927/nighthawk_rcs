@@ -183,8 +183,9 @@ class TopologyOptimizer3D:
                     smoothing=self.smoothness
                 )
                 
-                # Update control points
-                self.control_points += displacements
+                # Do NOT update control points - this causes drift and tangling
+                # Control points should always remain at their initial positions
+                # The deformation is applied relative to these fixed points
                 
                 # Evaluate
                 obj_value = self.objective_function(geometry, target_angles)
@@ -232,9 +233,11 @@ class TopologyOptimizer3D:
                 disp = np.zeros((n_control, 3))
                 disp[i, j] = epsilon
                 
-                # Apply perturbation
+                # Apply perturbation from INITIAL control points
+                # Use the original mesh vertices for control points
+                original_control_points = self.base_geometry.mesh.vertices[self.control_indices] if hasattr(self, 'control_indices') else self.control_points
                 perturbed_geom = geometry.apply_deformation(
-                    self.control_points, disp, self.smoothness)
+                    original_control_points, disp, self.smoothness)
                 perturbed_obj = self.objective_function(perturbed_geom, target_angles)
                 
                 # Finite difference
@@ -311,8 +314,8 @@ class TopologyOptimizer3D:
             n_vertices = len(initial_geometry.mesh.vertices)
             n_control = min(50, max(4, n_vertices // 20))
             n_control = min(n_control, n_vertices)
-            indices = np.random.choice(n_vertices, n_control, replace=False)
-            self.control_points = initial_geometry.mesh.vertices[indices].copy()
+            self.control_indices = np.random.choice(n_vertices, n_control, replace=False)
+            self.control_points = initial_geometry.mesh.vertices[self.control_indices].copy()
             
         n_params = self.control_points.shape[0] * 3
         
