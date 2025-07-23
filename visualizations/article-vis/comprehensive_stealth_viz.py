@@ -261,38 +261,9 @@ class StealthMathViz:
         fig.add_trace(go.Surface(x=x_sphere, y=y_sphere, z=z_sphere, 
                                 colorscale='Blues', opacity=0.7, name='Sphere'))
         
-        # Add incident wave vectors
-        n_rays = 20
-        for i in range(n_rays):
-            angle = 2 * np.pi * i / n_rays
-            x_start = 3 * np.cos(angle)
-            y_start = 3 * np.sin(angle)
-            z_start = 0
-            
-            fig.add_trace(go.Scatter3d(
-                x=[x_start, 0], y=[y_start, 0], z=[z_start, 0],
-                mode='lines+markers',
-                line=dict(color='blue', width=3),
-                marker=dict(size=3),
-                name='Incident Wave' if i == 0 else None,
-                showlegend=True if i == 0 else False
-            ))
-        
-        # Add scattered wave vectors
-        for i in range(n_rays):
-            angle = 2 * np.pi * i / n_rays
-            x_end = 3 * np.cos(angle)
-            y_end = 3 * np.sin(angle)
-            z_end = 0
-            
-            fig.add_trace(go.Scatter3d(
-                x=[0, x_end], y=[0, y_end], z=[0, z_end],
-                mode='lines+markers',
-                line=dict(color='red', width=2),
-                marker=dict(size=2),
-                name='Scattered Wave' if i == 0 else None,
-                showlegend=True if i == 0 else False
-            ))
+        # Note: Removed incident and scattered wave vectors that were causing blue lines
+        # to appear in RCS pattern visualizations. These conceptual elements should only
+        # appear in educational/conceptual visualizations, not in actual RCS pattern plots.
         
         fig.update_layout(
             title='Interactive RCS Concept - Sphere Scattering',

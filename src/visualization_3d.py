@@ -480,7 +480,7 @@ class RCSVisualizer3D:
             rcs_hh = 10 * np.log10(np.array(rcs_hh) + 1e-10)
             
             # Cartesian plot
-            ax1.plot(phi, rcs_vv, 'b-', linewidth=2, label='VV')
+            ax1.plot(phi, rcs_vv, 'g-', linewidth=2, label='VV')
             ax1.plot(phi, rcs_hh, 'r--', linewidth=2, label='HH')
             ax1.set_xlabel('Azimuth (degrees)')
             ax1.set_ylabel('RCS (dBsm)')
@@ -491,7 +491,7 @@ class RCSVisualizer3D:
             # Polar plot
             ax2 = plt.subplot(122, projection='polar')
             phi_rad = np.deg2rad(phi)
-            ax2.plot(phi_rad, rcs_vv, 'b-', linewidth=2, label='VV')
+            ax2.plot(phi_rad, rcs_vv, 'g-', linewidth=2, label='VV')
             ax2.plot(phi_rad, rcs_hh, 'r--', linewidth=2, label='HH')
             ax2.set_theta_zero_location('N')
             ax2.set_theta_direction(-1)
@@ -513,7 +513,7 @@ class RCSVisualizer3D:
             rcs_vv = 10 * np.log10(np.array(rcs_vv) + 1e-10)
             rcs_hh = 10 * np.log10(np.array(rcs_hh) + 1e-10)
             
-            ax1.plot(theta, rcs_vv, 'b-', linewidth=2, label='VV')
+            ax1.plot(theta, rcs_vv, 'g-', linewidth=2, label='VV')
             ax1.plot(theta, rcs_hh, 'r--', linewidth=2, label='HH')
             ax1.set_xlabel('Elevation (degrees)')
             ax1.set_ylabel('RCS (dBsm)')
@@ -525,7 +525,7 @@ class RCSVisualizer3D:
             # Polar plot (elevation)
             ax2 = plt.subplot(122, projection='polar')
             theta_rad = np.deg2rad(theta)
-            ax2.plot(theta_rad, rcs_vv, 'b-', linewidth=2, label='VV')
+            ax2.plot(theta_rad, rcs_vv, 'g-', linewidth=2, label='VV')
             ax2.plot(theta_rad, rcs_hh, 'r--', linewidth=2, label='HH')
             ax2.set_theta_zero_location('N')
             ax2.set_title(f'Elevation Pattern at φ={fixed_angle}°')
