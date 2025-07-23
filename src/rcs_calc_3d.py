@@ -1,157 +1,157 @@
 """
-Accurate 3D RCS calculation module with GPU acceleration.
+3D RCS calculation module using Physical Optics with JAX acceleration.
 
-This module implements Physical Optics (PO) and Physical Theory of Diffraction (PTD)
-for accurate RCS calculations on complex 3D geometries using GPU acceleration.
+This module implements Physical Optics (PO) for RCS calculations on 3D geometries.
+JAX is used for automatic CPU/GPU acceleration and batch processing.
 """
 
 import numpy as np
-from typing import Tuple, Optional, List
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap
+from typing import Tuple
 import trimesh
-from tqdm import tqdm
 from functools import partial
-
-# Try to import JAX for GPU acceleration
-try:
-    import jax
-    import jax.numpy as jnp
-    from jax import jit as jax_jit, vmap
-    GPU_AVAILABLE = len(jax.devices('gpu')) > 0
-except ImportError:
-    jax = None
-    jnp = np  # Fallback to NumPy
-    jax_jit = None
-    vmap = None
-    GPU_AVAILABLE = False
-    print("Warning: JAX not available, falling back to CPU computation")
-
-from numba import cuda, jit as numba_jit, prange
-import numba.cuda
 
 
 class RCS3DCalculator:
     """
-    Accurate 3D RCS calculator using Physical Optics with GPU acceleration.
+    3D RCS calculator using Physical Optics with JAX acceleration.
     
-    This implements the full vector formulation of PO including:
-    - Proper polarization handling
-    - Accurate phase calculations
-    - Edge diffraction corrections (PTD)
+    This implements the standard PO formulation:
+    - Surface currents: J_s = 2n × H
+    - Scattered field: E_s = (jkη/4π) ∫∫ J_s exp(jk·r') dS'
+    - RCS: σ = 4π|E_s|²/|E_i|²
     """
     
-    def __init__(self, frequency: float = 10e9, use_gpu: bool = True):
+    def __init__(self, frequency: float = 10e9):
         """
         Initialize 3D RCS calculator.
         
         Args:
             frequency: Radar frequency in Hz
-            use_gpu: Whether to use GPU acceleration if available
         """
         self.frequency = frequency
         self.wavelength = 3e8 / frequency
         self.k = 2 * np.pi / self.wavelength
-        self.use_gpu = use_gpu and GPU_AVAILABLE
+        self.eta = 377.0  # Impedance of free space
         
-        # Impedance of free space
-        self.eta = 377.0  # Ohms
+        # Check if GPU is available
+        self.device = jax.devices()[0]
+        print(f"Using JAX on {self.device}")
         
-        # Mesh caching for precomputed invariants
-        self._cached_mesh = None
-        self._face_centers = None
-        self._face_areas = None
-        self._face_normals = None
-        
-        # JAX compiled functions (will be compiled when first mesh is loaded)
-        self._rcs_gpu_func = None
-        self._batched_rcs_gpu_func = None
-        
-        if self.use_gpu:
-            if jax is not None:
-                print(f"Using GPU acceleration with JAX on {jax.devices()[0]}")
-            else:
-                print("Warning: JAX not available, switching to CPU computation")
-                self.use_gpu = False
+        # Mesh caching
+        self._cached_mesh_hash = None
+        self._mesh_data = None
+        self._rcs_func = None
+        self._rcs_batch_func = None
     
-    def _precompute_mesh_invariants(self, mesh: trimesh.Trimesh):
+    def _prepare_mesh_data(self, mesh: trimesh.Trimesh) -> dict:
         """
-        Precompute mesh invariants that don't change during RCS calculations.
+        Prepare mesh data for JAX computation.
         
         Args:
             mesh: 3D mesh object
+            
+        Returns:
+            Dictionary with JAX arrays of mesh data
         """
         # Check if we need to update cache
-        # Use mesh hash for better cache invalidation
         mesh_hash = hash((mesh.vertices.tobytes(), mesh.faces.tobytes()))
-        if (getattr(self, '_cached_mesh_hash', None) != mesh_hash or 
-            self._face_centers is None or 
-            self._face_areas is None or 
-            self._face_normals is None):
+        
+        if self._cached_mesh_hash != mesh_hash:
+            # Compute mesh properties
+            face_centers = mesh.vertices[mesh.faces].mean(axis=1)
+            face_normals = mesh.face_normals
             
-            # Precompute face centers
-            self._face_centers = mesh.vertices[mesh.faces].mean(axis=1)
-            
-            # Precompute face areas using cross product
+            # Face areas using cross product
             v0 = mesh.vertices[mesh.faces[:, 0]]
             v1 = mesh.vertices[mesh.faces[:, 1]]
             v2 = mesh.vertices[mesh.faces[:, 2]]
-            self._face_areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
+            face_areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
             
-            # Precompute face normals
-            self._face_normals = mesh.face_normals
+            # Convert to JAX arrays
+            self._mesh_data = {
+                'centers': jnp.asarray(face_centers),
+                'normals': jnp.asarray(face_normals),
+                'areas': jnp.asarray(face_areas)
+            }
             
-            # Cache the mesh reference
+            # Compile RCS functions
+            self._compile_functions()
+            
+            # Update cache
             self._cached_mesh_hash = mesh_hash
             
-            # Compile JAX functions if using GPU
-            if self.use_gpu and jax is not None:
-                self._compile_jax_functions()
-                 
+        return self._mesh_data
     
-    def clear_cache(self):
-        """Clear the cached mesh data and compiled functions."""
-        self._cached_mesh_hash = None
-        self._face_centers = None
-        self._face_areas = None
-        self._face_normals = None
-        self._rcs_gpu_func = None
-        self._batched_rcs_gpu_func = None
+    def _compile_functions(self):
+        """Compile JAX functions for RCS calculation."""
+        # Single angle calculation
+        self._rcs_func = jit(
+            partial(self._calculate_rcs_jax, 
+                   self._mesh_data['centers'],
+                   self._mesh_data['normals'], 
+                   self._mesh_data['areas']),
+            static_argnames=('k', 'eta')
+        )
+        
+        # Batch calculation
+        self._rcs_batch_func = jit(
+            vmap(partial(self._calculate_rcs_jax,
+                        self._mesh_data['centers'],
+                        self._mesh_data['normals'],
+                        self._mesh_data['areas']),
+                 in_axes=(0, 0, 0, 0, None, None)),
+            static_argnames=('k', 'eta')
+        )
     
-    def _compile_jax_functions(self):
-        """Compile JAX functions for GPU acceleration."""
-        if not self.use_gpu or jax is None or jax_jit is None:
-            return
-            
-        # Convert precomputed data to JAX DeviceArrays
-        face_centers_gpu = jnp.asarray(self._face_centers)
-        face_areas_gpu = jnp.asarray(self._face_areas)
-        face_normals_gpu = jnp.asarray(self._face_normals)
+    @staticmethod
+    def _calculate_rcs_jax(face_centers, face_normals, face_areas,
+                          ki_hat, ks_hat, Ei_hat, Es_hat, k, eta):
+        """
+        Pure JAX function for RCS calculation using Physical Optics.
         
-        try:
-            # Compile single RCS calculation function
-            self._rcs_gpu_func = jax_jit(
-                partial(self._calculate_rcs_gpu_pure, 
-                       face_centers_gpu, face_areas_gpu, face_normals_gpu),
-                static_argnames=('k', 'eta')
-            )
-            
-            # Compile batched RCS calculation function
-            self._batched_rcs_gpu_func = vmap(
-                partial(self._calculate_rcs_gpu_pure,
-                       face_centers_gpu, face_areas_gpu, face_normals_gpu),
-                in_axes=(0, 0, 0, 0, None, None)
-            )
-        except Exception as e:
-            print(f"Warning: JAX compilation failed: {e}")
-            print("Falling back to CPU computation")
-            self.use_gpu = False
-            self._rcs_gpu_func = None
-            self._batched_rcs_gpu_func = None
+        This is a pure function that can be JIT compiled and vectorized.
+        """
+        # Check illumination (visible faces)
+        cos_theta_i = jnp.dot(face_normals, -ki_hat)
+        illuminated = cos_theta_i > 0
         
+        # Incident magnetic field: H = (k × E) / η
+        Hi = jnp.cross(ki_hat, Ei_hat) / eta
+        
+        # Surface currents: J_s = 2n × H
+        Js = 2 * jnp.cross(face_normals, Hi)
+        
+        # Apply illumination mask
+        Js = jnp.where(illuminated[:, None], Js, 0.0)
+        
+        # Phase calculation
+        phase = k * (jnp.dot(face_centers, ki_hat) - jnp.dot(face_centers, ks_hat))
+        phase = jnp.where(illuminated, phase, 0.0)
+        
+        # Project surface currents onto receive polarization
+        proj = jnp.sum(Js * Es_hat, axis=1)
+        proj = jnp.where(illuminated, proj, 0.0)
+        
+        # Integrate with phase
+        contributions = proj * face_areas * jnp.exp(1j * phase)
+        scattered_field = jnp.sum(contributions)
+        
+        # Apply PO normalization: E_s = (jkη/4π) × integral
+        scattered_field *= (k * eta) / (4 * jnp.pi)
+        
+        # Calculate RCS: σ = 4π|E_s|²
+        rcs = 4 * jnp.pi * jnp.abs(scattered_field)**2
+        
+        return rcs
+    
     def calculate_rcs(self, mesh: trimesh.Trimesh, 
                      theta: float, phi: float,
                      polarization: str = 'VV') -> float:
         """
-        Calculate monostatic RCS for a single angle using accurate PO.
+        Calculate monostatic RCS for a single angle.
         
         Args:
             mesh: 3D mesh object
@@ -162,241 +162,57 @@ class RCS3DCalculator:
         Returns:
             RCS in square meters
         """
-        # Precompute mesh invariants if needed
-        self._precompute_mesh_invariants(mesh)
+        # Prepare mesh data
+        self._prepare_mesh_data(mesh)
         
         # Convert angles to radians
         theta_rad = np.deg2rad(theta)
         phi_rad = np.deg2rad(phi)
         
-        # Incident direction (from radar to target)
-        ki_hat = np.array([
+        # Incident wave propagation direction
+        # For theta=0, wave propagates downward (-z)
+        ki_hat = -np.array([
             np.sin(theta_rad) * np.cos(phi_rad),
             np.sin(theta_rad) * np.sin(phi_rad),
             np.cos(theta_rad)
         ])
         
-        # Scattered direction (monostatic: back to radar)
+        # Scattered direction (monostatic: opposite to incident)
         ks_hat = -ki_hat
         
         # Define polarization vectors
-        theta_hat = np.array([
-            np.cos(theta_rad) * np.cos(phi_rad),
-            np.cos(theta_rad) * np.sin(phi_rad),
-            -np.sin(theta_rad)
-        ])
-        phi_hat = np.array([-np.sin(phi_rad), np.cos(phi_rad), 0])
-        
-        # Incident field polarization
-        if polarization[0] == 'V':
-            Ei_hat = theta_hat
-        else:  # H
-            Ei_hat = phi_hat
-            
-        # Scattered field polarization  
-        if polarization[1] == 'V':
-            Es_hat = theta_hat
-        else:  # H
-            Es_hat = phi_hat
-        
-        if self.use_gpu and self._rcs_gpu_func is not None:
-            try:
-                # Convert to JAX arrays for GPU computation
-                ki_hat_jax = jnp.array(ki_hat)
-                ks_hat_jax = jnp.array(ks_hat)
-                Ei_hat_jax = jnp.array(Ei_hat)
-                Es_hat_jax = jnp.array(Es_hat)
-                
-                result = self._rcs_gpu_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
-                return float(result)  # Convert JAX result to Python float
-            except Exception as e:
-                print(f"JAX GPU computation failed: {e}")
-                print("Falling back to CPU computation")
-                return self._calculate_rcs_cpu(mesh, ki_hat, ks_hat, Ei_hat, Es_hat)
+        if theta_rad < 1e-6:  # Handle singularity at theta=0
+            theta_hat = np.array([1, 0, 0])
+            phi_hat = np.array([0, 1, 0])
         else:
-            return self._calculate_rcs_cpu(mesh, ki_hat, ks_hat, Ei_hat, Es_hat)
-            
-    def _calculate_rcs_cpu(self, mesh: trimesh.Trimesh,
-                          ki_hat: np.ndarray, ks_hat: np.ndarray,
-                          Ei_hat: np.ndarray, Es_hat: np.ndarray) -> float:
-        """CPU implementation of PO calculation using precomputed invariants."""
+            theta_hat = np.array([
+                np.cos(theta_rad) * np.cos(phi_rad),
+                np.cos(theta_rad) * np.sin(phi_rad),
+                -np.sin(theta_rad)
+            ])
+            phi_hat = np.array([-np.sin(phi_rad), np.cos(phi_rad), 0])
         
-        # Use precomputed mesh data
-        face_centers = self._face_centers
-        face_areas = self._face_areas
-        face_normals = self._face_normals
+        # Set incident and scattered polarizations
+        Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
+        Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
         
-        # Vectorized CPU implementation
-
-        # Face illumination mask
-        cos_theta_i = face_normals.dot(-ki_hat)
-        illuminated = cos_theta_i > 0
-
-        if not np.any(illuminated):
-            return 0.0
-
-        # Surface currents (constant Hi, Js varies with normals)
-        Hi = np.cross(ki_hat, Ei_hat) / self.eta  # (3,)
-
-        Js = 2 * np.cross(face_normals, Hi)  # (N,3)
-        Js[~illuminated] = 0.0  # Mask non-illuminated faces
-
-        # Phase term for each face
-        phase = self.k * (
-            face_centers.dot(ki_hat) - face_centers.dot(ks_hat)
-        )
-        phase[~illuminated] = 0.0
-
-        # Scattered field integrand
-        # Correct: (J_s × k̂_s) × k̂_s for transverse component
-        Js_cross_ks = np.cross(ks_hat, Js)  # (N,3)
-        integrand = np.cross(ks_hat, Js_cross_ks)  # (N,3)
-
-        # Projection onto receiving polarization and aggregation
-        proj = integrand.dot(Es_hat)  # (N,)
-        proj[~illuminated] = 0.0
-
-        contributions = proj * face_areas * np.exp(1j * phase)
-        scattered_field = contributions.sum()
-        scattered_field *= (self.k / (2 * np.pi))
+        # Convert to JAX arrays and calculate
+        ki_hat_jax = jnp.asarray(ki_hat)
+        ks_hat_jax = jnp.asarray(ks_hat)
+        Ei_hat_jax = jnp.asarray(Ei_hat)
+        Es_hat_jax = jnp.asarray(Es_hat)
         
-        # Calculate RCS: σ = 4π|Es|²/|Ei|²
-        # For far field, |Ei|² = 1 (normalized)
-        rcs = 4 * np.pi * np.abs(scattered_field)**2
+        rcs = self._rcs_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
         
-        return rcs
-
-    @staticmethod
-    def _calculate_rcs_gpu_pure(face_centers, face_areas, face_normals,
-                               ki_hat, ks_hat, Ei_hat, Es_hat, k, eta):
-        """
-        Pure JAX function for RCS calculation.
-        
-        This is a pure function that can be compiled and vectorized by JAX.
-        All inputs should be JAX arrays.
-        """
-        # Check illumination
-        cos_theta_i = jnp.dot(face_normals, -ki_hat)
-        illuminated = cos_theta_i > 0
-        
-        # Calculate surface currents for illuminated faces
-        Hi = jnp.cross(ki_hat, Ei_hat) / eta
-        Js = 2 * jnp.cross(face_normals, Hi)
-        Js = jnp.where(illuminated[:, None], Js, 0.0)
-        
-        # Phase calculations
-        r = face_centers
-        phase = k * (r @ ki_hat - r @ ks_hat)   # JAX supports @ for batched matvec
-        phase = jnp.where(illuminated, phase, 0.0)
-        
-        # Scattered field contributions
-        # Correct: (J_s × k̂_s) × k̂_s for transverse component
-        Js_cross_ks = jnp.cross(ks_hat, Js)
-        integrand = jnp.cross(ks_hat, Js_cross_ks)
-        
-        # Project onto receiving polarization
-        proj = jnp.sum(integrand * Es_hat, axis=1)
-        proj = jnp.where(illuminated, proj, 0.0)
-        
-        # Project and sum
-        contributions = (proj * 
-                        face_areas * 
-                        jnp.exp(1j * phase))
-        
-        scattered_field = jnp.sum(contributions)
-        scattered_field *= (k / (2 * np.pi))
-        
-        # Calculate RCS: σ = 4π|Es|²/|Ei|²
-        rcs = 4 * np.pi * jnp.abs(scattered_field)**2
-        
-        return rcs
-
-    def calculate_rcs_batch(self, mesh: trimesh.Trimesh,
-                           theta_angles: np.ndarray, phi_angles: np.ndarray,
-                           polarization: str = 'VV') -> np.ndarray:
-        """
-        Calculate RCS for multiple angles efficiently using batched GPU computation.
-        
-        Args:
-            mesh: 3D mesh object
-            theta_angles: Array of elevation angles in degrees
-            phi_angles: Array of azimuth angles in degrees
-            polarization: 'VV', 'HH', 'VH', or 'HV'
-            
-        Returns:
-            Array of RCS values in square meters
-        """
-        # Precompute mesh invariants if needed
-        self._precompute_mesh_invariants(mesh)
-        
-        if not self.use_gpu or self._batched_rcs_gpu_func is None:
-            # Fallback to CPU batch processing
-            rcs_values = np.zeros(len(theta_angles))
-            for i, (theta, phi) in enumerate(zip(theta_angles, phi_angles)):
-                rcs_values[i] = self.calculate_rcs(mesh, theta, phi, polarization)
-            return rcs_values
-        
-        # Convert angles to radians
-        theta_rad = np.deg2rad(theta_angles)
-        phi_rad = np.deg2rad(phi_angles)
-        
-        # Calculate incident directions
-        ki_hat = np.column_stack([
-            np.sin(theta_rad) * np.cos(phi_rad),
-            np.sin(theta_rad) * np.sin(phi_rad),
-            np.cos(theta_rad)
-        ])
-        
-        # Scattered directions (monostatic: back to radar)
-        ks_hat = -ki_hat
-        
-        # Define polarization vectors for each angle
-        theta_hat = np.column_stack([
-            np.cos(theta_rad) * np.cos(phi_rad),
-            np.cos(theta_rad) * np.sin(phi_rad),
-            -np.sin(theta_rad)
-        ])
-        phi_hat = np.column_stack([-np.sin(phi_rad), np.cos(phi_rad), np.zeros_like(phi_rad)])
-        
-        # Incident field polarization
-        if polarization[0] == 'V':
-            Ei_hat = theta_hat
-        else:  # H
-            Ei_hat = phi_hat
-            
-        # Scattered field polarization  
-        if polarization[1] == 'V':
-            Es_hat = theta_hat
-        else:  # H
-            Es_hat = phi_hat
-        
-        # Use batched GPU function
-        try:
-            # Convert to JAX arrays for GPU computation
-            ki_hat_jax = jnp.array(ki_hat)
-            ks_hat_jax = jnp.array(ks_hat)
-            Ei_hat_jax = jnp.array(Ei_hat)
-            Es_hat_jax = jnp.array(Es_hat)
-            
-            rcs_values = self._batched_rcs_gpu_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
-        except Exception as e:
-            print(f"JAX batched computation failed: {e}")
-            print("Falling back to CPU batch processing")
-            # Fallback to CPU batch processing
-            rcs_values = np.zeros(len(theta_angles))
-            for i, (theta, phi) in enumerate(zip(theta_angles, phi_angles)):
-                rcs_values[i] = self.calculate_rcs(mesh, theta, phi, polarization)
-            return rcs_values
-        
-        return np.array(rcs_values)
-        
+        return float(rcs)
+    
     def calculate_rcs_pattern(self, mesh: trimesh.Trimesh,
                             theta_range: Tuple[float, float] = (0, 180),
                             phi_range: Tuple[float, float] = (0, 360),
                             n_theta: int = 37, n_phi: int = 73,
                             polarization: str = 'VV') -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Calculate full 3D RCS pattern using optimized batch processing.
+        Calculate full 3D RCS pattern using batch processing.
         
         Args:
             mesh: 3D mesh object
@@ -409,32 +225,76 @@ class RCS3DCalculator:
         Returns:
             theta_grid, phi_grid, rcs_db: 2D arrays for plotting
         """
+        # Prepare mesh data
+        self._prepare_mesh_data(mesh)
+        
+        # Create angle grids
         theta = np.linspace(theta_range[0], theta_range[1], n_theta)
         phi = np.linspace(phi_range[0], phi_range[1], n_phi)
         theta_grid, phi_grid = np.meshgrid(theta, phi, indexing='ij')
         
-        # Flatten arrays for batch processing
+        # Flatten for batch processing
         theta_flat = theta_grid.flatten()
         phi_flat = phi_grid.flatten()
         
-        # Use batch processing if GPU is available
-        if self.use_gpu and self._batched_rcs_gpu_func is not None:
-            print("Using GPU batch processing for RCS pattern calculation...")
-            rcs_flat = self.calculate_rcs_batch(mesh, theta_flat, phi_flat, polarization)
-        else:
-            # Fallback to CPU processing with progress bar
-            print("Using CPU processing for RCS pattern calculation...")
-            rcs_flat = np.zeros(len(theta_flat))
-            total = len(theta_flat)
-            with tqdm(total=total, desc="Calculating RCS pattern") as pbar:
-                for i in range(total):
-                    rcs_flat[i] = self.calculate_rcs(mesh, theta_flat[i], phi_flat[i], polarization)
-                    pbar.update(1)
+        # Convert to radians
+        theta_rad = np.deg2rad(theta_flat)
+        phi_rad = np.deg2rad(phi_flat)
         
-        # Reshape back to 2D grid
-        rcs_grid = rcs_flat.reshape(theta_grid.shape)
+        # Calculate all directions
+        ki_hat = -np.column_stack([
+            np.sin(theta_rad) * np.cos(phi_rad),
+            np.sin(theta_rad) * np.sin(phi_rad),
+            np.cos(theta_rad)
+        ])
+        ks_hat = -ki_hat
         
-        # Convert to dBsm
+        # Polarization vectors
+        # Handle singularity at theta=0
+        mask_zero = theta_rad < 1e-6
+        
+        theta_hat = np.zeros_like(ki_hat)
+        phi_hat = np.zeros_like(ki_hat)
+        
+        # At theta=0
+        theta_hat[mask_zero] = [1, 0, 0]
+        phi_hat[mask_zero] = [0, 1, 0]
+        
+        # Away from theta=0
+        theta_hat[~mask_zero] = np.column_stack([
+            np.cos(theta_rad[~mask_zero]) * np.cos(phi_rad[~mask_zero]),
+            np.cos(theta_rad[~mask_zero]) * np.sin(phi_rad[~mask_zero]),
+            -np.sin(theta_rad[~mask_zero])
+        ])
+        phi_hat[~mask_zero] = np.column_stack([
+            -np.sin(phi_rad[~mask_zero]),
+            np.cos(phi_rad[~mask_zero]),
+            np.zeros(np.sum(~mask_zero))
+        ])
+        
+        # Set polarizations
+        Ei_hat = theta_hat if polarization[0] == 'V' else phi_hat
+        Es_hat = theta_hat if polarization[1] == 'V' else phi_hat
+        
+        # Convert to JAX arrays
+        ki_hat_jax = jnp.asarray(ki_hat)
+        ks_hat_jax = jnp.asarray(ks_hat)
+        Ei_hat_jax = jnp.asarray(Ei_hat)
+        Es_hat_jax = jnp.asarray(Es_hat)
+        
+        # Batch calculation
+        print(f"Calculating RCS pattern ({len(theta_flat)} angles)...")
+        rcs_flat = self._rcs_batch_func(ki_hat_jax, ks_hat_jax, Ei_hat_jax, Es_hat_jax, self.k, self.eta)
+        
+        # Reshape and convert to dB
+        rcs_grid = np.array(rcs_flat).reshape(theta_grid.shape)
         rcs_db = 10 * np.log10(rcs_grid + 1e-10)
         
         return theta_grid, phi_grid, rcs_db
+    
+    def clear_cache(self):
+        """Clear cached mesh data and compiled functions."""
+        self._cached_mesh_hash = None
+        self._mesh_data = None
+        self._rcs_func = None
+        self._rcs_batch_func = None
